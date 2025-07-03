@@ -1,0 +1,13 @@
+﻿# 核心功能
+openai
+python-dotenv
+line-bot-sdk
+
+# 網頁爬蟲
+feedparser
+beautifulsoup4
+requests
+lxml  # beautifulsoup4 需要的解析器
+
+# 語言偵測 (備用)
+langdetect

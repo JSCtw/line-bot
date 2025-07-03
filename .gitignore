@@ -1,1 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual Environment
+venv/
+.venv/
+ENV/
+env/
+
+# Dotenv
 .env
+
+# IDE/Editor files
+.vscode/
+.idea/
