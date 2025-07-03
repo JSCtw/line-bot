@@ -13,6 +13,9 @@ env/
 # Dotenv
 .env
 
+#雲端金鑰
+gcp_credentials.json
+
 # IDE/Editor files
 .vscode/
 .idea/
