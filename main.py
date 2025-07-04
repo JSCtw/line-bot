@@ -57,17 +57,26 @@ RSS_FEEDS = {
 
 # --- Google Sheets 核心模組 ---
 
+# ---【新增】Google Sheets 核心模組 ---
 def get_gspread_client():
+    """【無金鑰版】初始化 gspread 客戶端，在 Cloud Run 環境下會自動驗證。"""
     try:
-        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        creds = Credentials.from_service_account_file("gcp_credentials.json", scopes=scope)
+        # 在 Cloud Run 環境中，gspread 會自動尋找並使用 Runtime Service Account 的權限
+        creds = Credentials.from_service_account_file("gcp_credentials.json") # 本地測試時使用
         client = gspread.authorize(creds)
-        logger.info("Google Sheets API 驗證成功。")
+        logger.info("本地端 Google Sheets API 驗證成功。")
+        return client
+    except FileNotFoundError:
+        # 如果找不到本地金鑰檔，則嘗試使用雲端環境的預設權限
+        logger.info("未找到本地金鑰檔，嘗試使用雲端環境預設權限...")
+        client = gspread.service_account()
+        logger.info("雲端環境 Google Sheets API 驗證成功。")
         return client
     except Exception as e:
         logger.error(f"無法初始化 Google Sheets 客戶端: {e}")
         return None
 
+# ---不變 ---
 def get_sent_links(worksheet) -> set:
     try:
         links = worksheet.col_values(4) # Link 欄位在第 D 欄
