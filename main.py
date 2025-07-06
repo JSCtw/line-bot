@@ -29,12 +29,14 @@ load_dotenv()
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 USER_ID = os.getenv("USER_ID")
-GOOGLE_SHEET_NAME = "每日新聞推播記錄"
+# 【修改】不再使用名稱，改為從環境變數讀取 URL
+GOOGLE_SHEET_URL = os.getenv("GOOGLE_SHEET_URL") 
 
-# 檢查本地 .env 是否設定齊全 (主要用於本地測試)
+# 【修改】更新憑證檢查，確保 URL 存在
 if os.environ.get("IS_CLOUD_RUN") != "true":
-    if not all([OPENROUTER_API_KEY, LINE_CHANNEL_ACCESS_TOKEN, USER_ID]):
-        raise ValueError("本地環境：無法從 .env 載入必要憑證(API_KEY, LINE_TOKEN, USER_ID)")
+    if not all([OPENROUTER_API_KEY, LINE_CHANNEL_ACCESS_TOKEN, USER_ID, GOOGLE_SHEET_URL]):
+        raise ValueError("本地環境：無法從 .env 載入所有必要憑證，包括 GOOGLE_SHEET_URL")
+
 
 # 初始化所有 API Client
 try:
@@ -310,33 +312,24 @@ def process_news(news_list: list) -> list:
     return final_processed_news
 
 def run_news_pipeline():
-    """【最終穩健版】完整的新聞處理與推播管線，強化了首次運行的穩定性。"""
+    """【URL直接存取版】完整新聞管線，確保操作正確的試算表。"""
     logger.info("="*20 + " 啟動新聞處理管線 " + "="*20)
     
-    # 步驟一：初始化 Google Sheet 連線
     gs_client = get_gspread_client()
     if not gs_client:
         logger.error("無法繼續執行，因 Google Sheet 客戶端初始化失敗。")
         return
 
-    # 步驟二：【強化】開啟或建立試算表與工作表
+    # 【核心修改】不再透過名稱搜尋，而是直接用 URL 打開
     try:
-        spreadsheet = gs_client.open(GOOGLE_SHEET_NAME)
-    except gspread.exceptions.SpreadsheetNotFound:
-        logger.warning(f"找不到名為 '{GOOGLE_SHEET_NAME}' 的試算表，將建立一個新的。")
-        spreadsheet = gs_client.create(GOOGLE_SHEET_NAME)
-        # 重要：新建的檔案需要手動將您的服務帳戶 Email 加入共用編輯者
-        # 您可以在 GCP Console -> IAM -> 服務帳戶中找到這個 Email
-        logger.warning(f"重要！請手動將您的服務帳戶 Email 加入到新的試算表 '{GOOGLE_SHEET_NAME}' 的共用權限中。")
-
-    try:
+        logger.info(f"正在嘗試透過 URL 直接開啟 Google Sheet...")
+        spreadsheet = gs_client.open_by_url(GOOGLE_SHEET_URL)
         worksheet = spreadsheet.worksheet("sent_news_log")
-    except gspread.exceptions.WorksheetNotFound:
-        logger.warning(f"在試算表中找不到名為 'sent_news_log' 的工作表，將建立一個新的。")
-        # 預設第一個工作表名為 'Sheet1'，我們將其重新命名
-        worksheet = spreadsheet.worksheet("Sheet1")
-        worksheet.update_title("sent_news_log")
-        worksheet.update('A1:D1', [['Timestamp', 'Title', 'Summary', 'Link']])
+        logger.info(f"成功透過 URL 開啟試算表: {spreadsheet.title}")
+    except Exception as e:
+        logger.error(f"透過 URL 開啟 Google Sheet 失敗！請檢查 URL 是否正確，以及服務帳戶是否有此試算表的編輯權限。錯誤: {e}")
+        # 將錯誤向上拋出，以便在 Cloud Run 日誌中看到詳細資訊
+        raise e
 
     # 步驟三：讀取歷史連結
     sent_links_set = get_sent_links(worksheet)
