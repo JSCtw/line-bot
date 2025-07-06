@@ -7,6 +7,7 @@ import os
 import logging
 import random
 import gspread
+import google.auth # <--- 【新增】匯入 google.auth 模組
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
@@ -15,8 +16,11 @@ from difflib import SequenceMatcher
 from openai import OpenAI
 from linebot.v3.messaging import MessagingApi, Configuration, ApiClient
 from linebot.v3.messaging.models import TextMessage, PushMessageRequest
+from flask import Flask
 
-# --- 0. 基礎設定 ---
+# ==============================================================================
+# 0. 基礎設定 (在所有函式與應用程式邏輯之前)
+# ==============================================================================
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -27,26 +31,25 @@ LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 USER_ID = os.getenv("USER_ID")
 GOOGLE_SHEET_NAME = "每日新聞推播記錄"
 
-if not all([OPENROUTER_API_KEY, LINE_CHANNEL_ACCESS_TOKEN, USER_ID]):
-    raise ValueError("無法從環境變數中載入必要憑證(API_KEY, LINE_TOKEN, USER_ID)，請檢查 .env 檔案")
+# 檢查本地 .env 是否設定齊全 (主要用於本地測試)
+if os.environ.get("IS_CLOUD_RUN") != "true":
+    if not all([OPENROUTER_API_KEY, LINE_CHANNEL_ACCESS_TOKEN, USER_ID]):
+        raise ValueError("本地環境：無法從 .env 載入必要憑證(API_KEY, LINE_TOKEN, USER_ID)")
 
+# 初始化所有 API Client
 try:
     configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
     api_client = ApiClient(configuration)
     line_bot_api = MessagingApi(api_client)
     logger.info("LINE Bot API 初始化成功。")
-except Exception as e:
-    logger.error(f"LINE Bot API 初始化失敗: {e}")
-    exit()
 
-try:
     client = OpenAI(
         base_url="https://openrouter.ai/api/v1",
         api_key=OPENROUTER_API_KEY,
     )
     logger.info("OpenRouter Client 初始化成功。")
 except Exception as e:
-    logger.error(f"OpenRouter Client 初始化失敗: {e}")
+    logger.error(f"API Client 初始化失敗: {e}")
     exit()
 
 RSS_FEEDS = {
@@ -55,38 +58,46 @@ RSS_FEEDS = {
     "Fox News": "https://moxie.foxnews.com/google-publisher/world.xml"
 }
 
-# --- Google Sheets 核心模組 ---
+# ==============================================================================
+# 1. 所有函式定義 (Helper Functions & Core Logic)
+# ==============================================================================
 
-# ---【新增】Google Sheets 核心模組 ---
 def get_gspread_client():
-    """【無金鑰版】初始化 gspread 客戶端，在 Cloud Run 環境下會自動驗證。"""
+    """【最終正確版】使用應用程式預設憑證 (ADC) 進行驗證。"""
+    logger.info("正在使用應用程式預設憑證 (ADC) 進行驗證...")
     try:
-        # 在 Cloud Run 環境中，gspread 會自動尋找並使用 Runtime Service Account 的權限
-        creds = Credentials.from_service_account_file("gcp_credentials.json") # 本地測試時使用
+        # 在 Cloud Run 環境中，這個方法會自動使用附加的服務帳戶權限
+        # 在本地端，它會尋找您透過 `gcloud auth application-default login` 設定的權限
+        creds, _ = google.auth.default(
+            scopes=["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        )
         client = gspread.authorize(creds)
-        logger.info("本地端 Google Sheets API 驗證成功。")
-        return client
-    except FileNotFoundError:
-        # 如果找不到本地金鑰檔，則嘗試使用雲端環境的預設權限
-        logger.info("未找到本地金鑰檔，嘗試使用雲端環境預設權限...")
-        client = gspread.service_account()
-        logger.info("雲端環境 Google Sheets API 驗證成功。")
+        logger.info("Google API Client 驗證成功！")
         return client
     except Exception as e:
-        logger.error(f"無法初始化 Google Sheets 客戶端: {e}")
-        return None
+        logger.error(f"使用 ADC 進行驗證失敗: {e}")
+        raise e
 
-# ---不變 ---
-def get_sent_links(worksheet) -> set:
+def get_sent_links(worksheet):
+    """從工作表中讀取所有已發送的連結並返回一個集合。"""
     try:
         links = worksheet.col_values(4) # Link 欄位在第 D 欄
         logger.info(f"從 Google Sheet 讀取到 {len(links) - 1} 筆已發送記錄。")
         return set(links[1:])
+    except gspread.exceptions.WorksheetNotFound:
+        logger.warning(f"在試算表中找不到名為 '{worksheet.title}' 的工作表，將自動建立。")
+        worksheet.spreadsheet.add_worksheet(title=worksheet.title, rows="1", cols="4")
+        # 需要重新獲取工作表對象
+        new_worksheet = worksheet.spreadsheet.worksheet(worksheet.title)
+        new_worksheet.update('A1:D1', [['Timestamp', 'Title', 'Summary', 'Link']])
+        logger.info(f"已建立新的工作表 '{worksheet.title}' 並設定表頭。")
+        return set()
     except Exception as e:
         logger.error(f"讀取 Google Sheet 歷史連結失敗: {e}")
         return set()
 
 def log_sent_news(worksheet, news_items: list):
+    """將成功發送的新聞記錄寫入工作表。"""
     try:
         tz = timezone(timedelta(hours=+8))
         rows_to_append = []
@@ -100,9 +111,8 @@ def log_sent_news(worksheet, news_items: list):
     except Exception as e:
         logger.error(f"寫入 Google Sheet 失敗: {e}")
 
-# --- 1. 新聞爬取模組 ---
-
 def fetch_rss_news():
+    """從 RSS 來源抓取新聞"""
     all_news = []
     for source, url in RSS_FEEDS.items():
         try:
@@ -117,6 +127,7 @@ def fetch_rss_news():
     return all_news
 
 def fetch_html_news():
+    """從 Al Jazeera 靜態 HTML 頁面抓取新聞"""
     url = "https://www.aljazeera.com/news/"
     all_news = []
     try:
@@ -144,9 +155,6 @@ def fetch_html_news():
     except Exception as e:
         logger.error(f"抓取 Al Jazeera 新聞列表失敗: {e}")
     return all_news
-
-
-# --- 2. AI 核心模組 ---
 
 def create_classifier_prompt(title: str, content: str) -> str:
     """為分類任務創建專屬的「範例學習」Prompt。"""
@@ -220,10 +228,8 @@ def get_ai_response(prompt: str, model: str, temperature: float = None) -> str:
         logger.error(f"對模型 {model} 的 API 呼叫失敗: {e}")
         return ""
 
-# --- 3. 主處理流程模組 ---
-
 def classify_and_filter_news(news_list: list, sent_links: set) -> list:
-    """【最終擴充版】擴充了解析關鍵字，以應對更多樣的 AI 回應。"""
+    """使用 AI 分類器過濾新聞，並移除已發送過的新聞。"""
     logger.info("--- 開始執行 AI 分類與初步過濾 ---")
     
     unsent_news = [news for news in news_list if news.get("link") not in sent_links]
@@ -234,35 +240,19 @@ def classify_and_filter_news(news_list: list, sent_links: set) -> list:
         prompt = create_classifier_prompt(news['title'], news.get('content', '')[:1000])
         response_text = get_ai_response(prompt, model="mistralai/mistral-7b-instruct", temperature=0.1)
         
-        logger.info(f"AI 分類器對 '{news['title'][:30]}...' 的原始回應: '{response_text}'")
-
         if not response_text:
-            logger.warning(f"分類失敗，跳過新聞: {news['title']}")
+            logger.warning(f"分類器未回傳內容，跳過新聞: {news['title']}")
             continue
-        
-        scope = "解析失敗"
-        response_lower = response_text.lower()
-        
-        # --- 【修改】擴充關鍵字列表 ---
-        global_keywords = ['global', '全球性', '國際性']
-        # 新增了 '地區', '區域', '國外', 'european' 等詞來增加匹配成功率
-        regional_keywords = ['regional', '區域性', '局部性', '國外', '地區', '區域', 'european'] 
-        domestic_keywords = ['domestic', '國內性']
-        # --------------------------------
 
+        scope = "解析失敗"
+        global_keywords, regional_keywords, domestic_keywords = ['global', '全球性', '國際性'], ['regional', '區域性', '局部性', '國外', '地區', '區域', 'european'], ['domestic', '國內性']
         is_global = any(keyword in response_text for keyword in global_keywords)
-        is_regional = any(keyword in response_text or keyword in response_lower for keyword in regional_keywords)
+        is_regional = any(keyword in response_text or keyword in response_text.lower() for keyword in regional_keywords)
         is_domestic = any(keyword in response_text.lower() or keyword in response_text for keyword in domestic_keywords)
 
-        # 按優先級賦值
-        if is_global:
-            scope = '全球性 (Global)'
-        elif is_regional:
-            scope = '區域性 (Regional)'
-        elif is_domestic:
-            scope = '國內性 (Domestic)'
-        
-        logger.info(f"新聞 '{news['title'][:30]}...' 的影響力被【最終解析】為: {scope}")
+        if is_global: scope = '全球性 (Global)'
+        elif is_regional: scope = '區域性 (Regional)'
+        elif is_domestic: scope = '國內性 (Domestic)'
         
         if scope in ['全球性 (Global)', '區域性 (Regional)']:
             filtered_news.append(news)
@@ -281,11 +271,8 @@ def process_news(news_list: list) -> list:
         matched = False
         for group in grouped_news:
             if SequenceMatcher(None, news["title"], group[0]["title"]).ratio() > 0.7:
-                group.append(news)
-                matched = True
-                break
-        if not matched:
-            grouped_news.append([news])
+                group.append(news); matched = True; break
+        if not matched: grouped_news.append([news])
     logger.info(f"重要新聞被分為 {len(grouped_news)} 組。")
 
     sorted_groups = sorted(grouped_news, key=len, reverse=True)
@@ -299,24 +286,19 @@ def process_news(news_list: list) -> list:
         if source_usage_count.get(primary_source, 0) < MAX_FROM_ONE_SOURCE:
             selected_groups_for_push.append(group)
             source_usage_count[primary_source] = source_usage_count.get(primary_source, 0) + 1
-    
     logger.info(f"據多樣性演算法，選擇 {len(selected_groups_for_push)} 組新聞進行摘要。各來源選取統計: {source_usage_count}")
 
     final_processed_news = []
     for news_group in selected_groups_for_push:
         fusion_prompt = create_fusion_prompt(news_group)
         ai_response_text = get_ai_response(fusion_prompt, model="qwen/qwen-2-72b-instruct", temperature=0.6)
-        
         if not ai_response_text: continue
             
         raw_title, raw_summary = "無標題", "無法產生摘要"
         for line in ai_response_text.split('\n'):
-            if line.startswith("繁體中文標題:"):
-                raw_title = line.replace("繁體中文標題:", "").strip()
-            elif line.startswith("繁體中文摘要:"):
-                raw_summary = line.replace("繁體中文摘要:", "").strip()
+            if line.startswith("繁體中文標題:"): raw_title = line.replace("繁體中文標題:", "").strip()
+            elif line.startswith("繁體中文摘要:"): raw_summary = line.replace("繁體中文摘要:", "").strip()
         
-        # 後處理
         processed_title = raw_title.replace("特朗普", "川普").replace("加沙", "加薩")
         processed_summary = raw_summary.replace("特朗普", "川普").replace("加沙", "加薩")
         processed_summary = re.sub(r'([一-龥])\s+([一-龥])', r'\1\2', processed_summary).replace(' ', '')
@@ -327,26 +309,48 @@ def process_news(news_list: list) -> list:
 
     return final_processed_news
 
-# --- 4. 完整管線與主入口 ---
-
 def run_news_pipeline():
-    """完整的新聞處理與推播管線。"""
+    """【最終穩健版】完整的新聞處理與推播管線，強化了首次運行的穩定性。"""
     logger.info("="*20 + " 啟動新聞處理管線 " + "="*20)
-
+    
+    # 步驟一：初始化 Google Sheet 連線
     gs_client = get_gspread_client()
     if not gs_client:
         logger.error("無法繼續執行，因 Google Sheet 客戶端初始化失敗。")
         return
-    worksheet = gs_client.open(GOOGLE_SHEET_NAME).worksheet("sent_news_log")
+
+    # 步驟二：【強化】開啟或建立試算表與工作表
+    try:
+        spreadsheet = gs_client.open(GOOGLE_SHEET_NAME)
+    except gspread.exceptions.SpreadsheetNotFound:
+        logger.warning(f"找不到名為 '{GOOGLE_SHEET_NAME}' 的試算表，將建立一個新的。")
+        spreadsheet = gs_client.create(GOOGLE_SHEET_NAME)
+        # 重要：新建的檔案需要手動將您的服務帳戶 Email 加入共用編輯者
+        # 您可以在 GCP Console -> IAM -> 服務帳戶中找到這個 Email
+        logger.warning(f"重要！請手動將您的服務帳戶 Email 加入到新的試算表 '{GOOGLE_SHEET_NAME}' 的共用權限中。")
+
+    try:
+        worksheet = spreadsheet.worksheet("sent_news_log")
+    except gspread.exceptions.WorksheetNotFound:
+        logger.warning(f"在試算表中找不到名為 'sent_news_log' 的工作表，將建立一個新的。")
+        # 預設第一個工作表名為 'Sheet1'，我們將其重新命名
+        worksheet = spreadsheet.worksheet("Sheet1")
+        worksheet.update_title("sent_news_log")
+        worksheet.update('A1:D1', [['Timestamp', 'Title', 'Summary', 'Link']])
+
+    # 步驟三：讀取歷史連結
     sent_links_set = get_sent_links(worksheet)
     
+    # 步驟四：抓取所有新聞
     all_raw_news = []
     all_raw_news.extend(fetch_rss_news())
     all_raw_news.extend(fetch_html_news())
     logger.info(f"【抓取階段完成】共抓取到 {len(all_raw_news)} 則原始新聞。")
 
+    # 步驟五：分類與過濾
     important_news = classify_and_filter_news(all_raw_news, sent_links_set)
     
+    # 步驟六：摘要與處理
     processed_news_list = process_news(important_news)
     
     if not processed_news_list:
@@ -354,8 +358,8 @@ def run_news_pipeline():
         logger.info("="*22 + " 管線執行完畢 " + "="*22)
         return
 
+    # 步驟七：發送至 LINE
     logger.info(f"準備推播 {len(processed_news_list)} 則新聞摘要...")
-    
     tz = timezone(timedelta(hours=+8))
     now = datetime.now(tz)
     hour = now.hour
@@ -379,10 +383,40 @@ def run_news_pipeline():
         except Exception as e:
             logger.error(f"推送第 {i+1} 則新聞至 LINE 失敗: {e}")
     
+    # 步驟八：記錄到 Google Sheet
     log_sent_news(worksheet, processed_news_list)
 
     logger.info("所有新聞推送完成！")
     logger.info("="*22 + " 管線執行完畢 " + "="*22)
 
+# ==============================================================================
+# 2. Flask App 定義 (Gunicorn 的進入點)
+# ==============================================================================
+
+app = Flask(__name__)
+
+@app.route("/", methods=["POST", "GET"])
+def main_handler():
+    """【終極除錯版】捕捉詳細錯誤並直接回傳。"""
+    try:
+        run_news_pipeline()
+        return "Pipeline executed successfully.", 200
+    except Exception as e:
+        # 捕捉完整的 Traceback 字串
+        error_traceback = traceback.format_exc()
+        
+        # 在日誌中記錄更詳細的錯誤，方便我們查看
+        logger.error(f"FATAL ERROR during pipeline execution:\n{error_traceback}")
+        
+        # 將詳細錯誤訊息作為 HTTP 回應的一部分傳回，以便在 Scheduler 日誌中看到
+        # 限制長度以避免超過 HTTP 回應大小限制
+        return f"An internal error occurred:\n{error_traceback[:4000]}", 500
+
+
+# ==============================================================================
+# 3. 本地端執行入口 (直接用 python main.py 執行)
+# ==============================================================================
+
 if __name__ == "__main__":
+    logger.info("偵測到本地端直接執行，開始執行一次新聞管線...")
     run_news_pipeline()
