@@ -32,10 +32,12 @@ USER_ID = os.getenv("USER_ID")
 GOOGLE_SHEET_URL = os.getenv("GOOGLE_SHEET_URL") 
 CLASSIFIER_BATCH_SIZE = 10
 
+# 在雲端環境中，環境變數由 Cloud Run 提供，此檢查主要用於本地
 if os.environ.get("IS_CLOUD_RUN") != "true":
     if not all([OPENROUTER_API_KEY, LINE_CHANNEL_ACCESS_TOKEN, USER_ID, GOOGLE_SHEET_URL]):
         raise ValueError("本地環境：無法從 .env 載入所有必要憑證，包括 GOOGLE_SHEET_URL")
 
+# 初始化所有 API Client
 try:
     configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
     api_client = ApiClient(configuration)
