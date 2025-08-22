@@ -8,6 +8,7 @@ import logging
 import random
 import gspread
 import google.auth
+import traceback
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
@@ -29,7 +30,7 @@ load_dotenv()
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 USER_ID = os.getenv("USER_ID")
-GOOGLE_SHEET_URL = os.getenv("GOOGLE_SHEET_URL") 
+GOOGLE_SHEET_URL = os.getenv("GOOGLE_SHEET_URL")
 CLASSIFIER_BATCH_SIZE = 10
 
 # 在雲端環境中，環境變數由 Cloud Run 提供，此檢查主要用於本地
@@ -43,7 +44,11 @@ try:
     api_client = ApiClient(configuration)
     line_bot_api = MessagingApi(api_client)
     logger.info("LINE Bot API 初始化成功。")
-    client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY)
+
+    client = OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=OPENROUTER_API_KEY,
+    )
     logger.info("OpenRouter Client 初始化成功。")
 except Exception as e:
     logger.error(f"API Client 初始化失敗: {e}")
@@ -60,9 +65,12 @@ RSS_FEEDS = {
 # ==============================================================================
 
 def get_gspread_client():
+    """【最終正確版】使用應用程式預設憑證 (ADC) 進行驗證。"""
     logger.info("正在使用應用程式預設憑證 (ADC) 進行驗證...")
     try:
-        creds, _ = google.auth.default(scopes=["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"])
+        creds, _ = google.auth.default(
+            scopes=["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        )
         client = gspread.authorize(creds)
         logger.info("Google API Client 驗證成功！")
         return client
@@ -71,8 +79,9 @@ def get_gspread_client():
         raise e
 
 def get_sent_links(worksheet):
+    """從工作表中讀取所有已發送的連結並返回一個集合。"""
     try:
-        links = worksheet.col_values(4)
+        links = worksheet.col_values(4) # Link 欄位在第 D 欄
         logger.info(f"從 Google Sheet 讀取到 {len(links) - 1} 筆已發送記錄。")
         return set(links[1:])
     except gspread.exceptions.WorksheetNotFound:
@@ -86,6 +95,7 @@ def get_sent_links(worksheet):
         return set()
 
 def get_translation_glossary(spreadsheet) -> dict:
+    """從 Google Sheet 讀取術語表並返回一個字典。"""
     try:
         worksheet = spreadsheet.worksheet("glossary")
         records = worksheet.get_all_records()
@@ -100,6 +110,7 @@ def get_translation_glossary(spreadsheet) -> dict:
         return {}
 
 def log_sent_news(worksheet, news_items: list):
+    """將成功發送的新聞記錄寫入工作表。"""
     try:
         tz = timezone(timedelta(hours=+8))
         rows_to_append = []
@@ -113,6 +124,7 @@ def log_sent_news(worksheet, news_items: list):
         logger.error(f"寫入 Google Sheet 失敗: {e}")
 
 def fetch_rss_news():
+    """從 RSS 來源抓取新聞，並加入時效性過濾器。"""
     all_news, MAX_NEWS_AGE_DAYS = [], 3
     for source, url in RSS_FEEDS.items():
         try:
@@ -137,6 +149,7 @@ def fetch_rss_news():
     return all_news
 
 def fetch_html_news():
+    """從 Al Jazeera 靜態 HTML 頁面抓取新聞"""
     all_news = []
     url = "https://www.aljazeera.com/news/"
     try:
@@ -157,6 +170,7 @@ def fetch_html_news():
     return all_news
 
 def create_batch_classifier_prompt(news_batch: list) -> str:
+    """為批次分類任務創建專屬的 Prompt。"""
     input_articles_str = ""
     for i, news_item in enumerate(news_batch):
         content_snippet = news_item.get('content', '')[:500]
@@ -187,6 +201,7 @@ Article 2: Topic: 社會 & 人文 | Scope: 國內性
     return prompt
 
 def create_fusion_prompt(news_list: list, glossary: dict) -> str:
+    """為融合摘要任務創建專屬的 Prompt，並注入術語表規則。"""
     input_materials_str = ""
     for i, news_item in enumerate(news_list):
         input_materials_str += f"---\nSource {i+1}: {news_item['source']}\nTitle: {news_item['title']}\nContent: {news_item.get('content', '')}\n"
@@ -213,6 +228,7 @@ Fuse all information above. Your final output must be a single headline and a si
     return prompt
 
 def get_ai_response(prompt: str, model: str, temperature: float = None) -> str:
+    """通用的 AI API 呼叫函式。"""
     try:
         request_params = { "model": model, "messages": [{"role": "user", "content": prompt}] }
         if temperature is not None: request_params["temperature"] = temperature
@@ -223,6 +239,7 @@ def get_ai_response(prompt: str, model: str, temperature: float = None) -> str:
         return ""
 
 def classify_and_filter_news(news_list: list, sent_links: set) -> list:
+    """【批次處理版】使用 AI 分類器過濾新聞，並移除已發送過的新聞。"""
     logger.info("--- 開始執行 AI 批次分類與初步過濾 ---")
     unsent_news = [news for news in news_list if news.get("link") not in sent_links]
     if not unsent_news: return []
@@ -268,6 +285,7 @@ def classify_and_filter_news(news_list: list, sent_links: set) -> list:
     return filtered_news
 
 def process_news(news_list: list, glossary: dict) -> list:
+    """對過濾後的新聞進行分組、排序、AI摘要與後處理。"""
     if not news_list: return []
     
     grouped_news = []
@@ -314,7 +332,9 @@ def process_news(news_list: list, glossary: dict) -> list:
     return final_processed_news
 
 def run_news_pipeline():
+    """完整的新聞處理與推播管線。"""
     logger.info("="*20 + " 啟動新聞處理管線 " + "="*20)
+    
     gs_client = get_gspread_client()
     if not gs_client:
         logger.error("無法繼續執行，因 Google Sheet 客戶端初始化失敗。"); return
@@ -324,7 +344,8 @@ def run_news_pipeline():
         log_worksheet = spreadsheet.worksheet("sent_news_log")
         translation_glossary = get_translation_glossary(spreadsheet)
     except Exception as e:
-        logger.error(f"開啟 Google Sheet 或讀取工作表失敗: {e}"); return
+        logger.error(f"開啟 Google Sheet 或讀取工作表失敗: {e}");
+        raise e
     
     sent_links_set = get_sent_links(log_worksheet)
     
@@ -374,6 +395,7 @@ app = Flask(__name__)
 
 @app.route("/", methods=["POST", "GET"])
 def main_handler():
+    """這是 Cloud Run 服務被呼叫時執行的主要函式。"""
     try:
         run_news_pipeline()
         return "Pipeline executed successfully.", 200
