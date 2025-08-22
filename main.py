@@ -7,7 +7,7 @@ import os
 import logging
 import random
 import gspread
-import google.auth # <--- 【新增】匯入 google.auth 模組
+import google.auth
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
@@ -19,7 +19,7 @@ from linebot.v3.messaging.models import TextMessage, PushMessageRequest
 from flask import Flask
 
 # ==============================================================================
-# 0. 基礎設定 (在所有函式與應用程式邏輯之前)
+# 0. 基礎設定
 # ==============================================================================
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -29,26 +29,19 @@ load_dotenv()
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 USER_ID = os.getenv("USER_ID")
-# 【修改】不再使用名稱，改為從環境變數讀取 URL
 GOOGLE_SHEET_URL = os.getenv("GOOGLE_SHEET_URL") 
+CLASSIFIER_BATCH_SIZE = 10
 
-# 【修改】更新憑證檢查，確保 URL 存在
 if os.environ.get("IS_CLOUD_RUN") != "true":
     if not all([OPENROUTER_API_KEY, LINE_CHANNEL_ACCESS_TOKEN, USER_ID, GOOGLE_SHEET_URL]):
         raise ValueError("本地環境：無法從 .env 載入所有必要憑證，包括 GOOGLE_SHEET_URL")
 
-
-# 初始化所有 API Client
 try:
     configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
     api_client = ApiClient(configuration)
     line_bot_api = MessagingApi(api_client)
     logger.info("LINE Bot API 初始化成功。")
-
-    client = OpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=OPENROUTER_API_KEY,
-    )
+    client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY)
     logger.info("OpenRouter Client 初始化成功。")
 except Exception as e:
     logger.error(f"API Client 初始化失敗: {e}")
@@ -61,18 +54,13 @@ RSS_FEEDS = {
 }
 
 # ==============================================================================
-# 1. 所有函式定義 (Helper Functions & Core Logic)
+# 1. 所有函式定義
 # ==============================================================================
 
 def get_gspread_client():
-    """【最終正確版】使用應用程式預設憑證 (ADC) 進行驗證。"""
     logger.info("正在使用應用程式預設憑證 (ADC) 進行驗證...")
     try:
-        # 在 Cloud Run 環境中，這個方法會自動使用附加的服務帳戶權限
-        # 在本地端，它會尋找您透過 `gcloud auth application-default login` 設定的權限
-        creds, _ = google.auth.default(
-            scopes=["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        )
+        creds, _ = google.auth.default(scopes=["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"])
         client = gspread.authorize(creds)
         logger.info("Google API Client 驗證成功！")
         return client
@@ -81,32 +69,41 @@ def get_gspread_client():
         raise e
 
 def get_sent_links(worksheet):
-    """從工作表中讀取所有已發送的連結並返回一個集合。"""
     try:
-        links = worksheet.col_values(4) # Link 欄位在第 D 欄
+        links = worksheet.col_values(4)
         logger.info(f"從 Google Sheet 讀取到 {len(links) - 1} 筆已發送記錄。")
         return set(links[1:])
     except gspread.exceptions.WorksheetNotFound:
         logger.warning(f"在試算表中找不到名為 '{worksheet.title}' 的工作表，將自動建立。")
         worksheet.spreadsheet.add_worksheet(title=worksheet.title, rows="1", cols="4")
-        # 需要重新獲取工作表對象
         new_worksheet = worksheet.spreadsheet.worksheet(worksheet.title)
         new_worksheet.update('A1:D1', [['Timestamp', 'Title', 'Summary', 'Link']])
-        logger.info(f"已建立新的工作表 '{worksheet.title}' 並設定表頭。")
         return set()
     except Exception as e:
         logger.error(f"讀取 Google Sheet 歷史連結失敗: {e}")
         return set()
 
+def get_translation_glossary(spreadsheet) -> dict:
+    try:
+        worksheet = spreadsheet.worksheet("glossary")
+        records = worksheet.get_all_records()
+        glossary = {item['English_Term']: item['Taiwan_Term'] for item in records if item.get('English_Term')}
+        logger.info(f"成功從 Google Sheet 讀取到 {len(glossary)} 筆術語。")
+        return glossary
+    except gspread.exceptions.WorksheetNotFound:
+        logger.warning("在試算表中找不到名為 'glossary' 的工作表，將使用空術語表。")
+        return {}
+    except Exception as e:
+        logger.error(f"讀取術語表失敗: {e}")
+        return {}
+
 def log_sent_news(worksheet, news_items: list):
-    """將成功發送的新聞記錄寫入工作表。"""
     try:
         tz = timezone(timedelta(hours=+8))
         rows_to_append = []
         for item in news_items:
             timestamp = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
             rows_to_append.append([timestamp, item['title'], item['summary'], item['link']])
-        
         if rows_to_append:
             worksheet.append_rows(rows_to_append, value_input_option='USER_ENTERED')
             logger.info(f"已將 {len(rows_to_append)} 則新紀錄寫入 Google Sheet。")
@@ -114,24 +111,32 @@ def log_sent_news(worksheet, news_items: list):
         logger.error(f"寫入 Google Sheet 失敗: {e}")
 
 def fetch_rss_news():
-    """從 RSS 來源抓取新聞"""
-    all_news = []
+    all_news, MAX_NEWS_AGE_DAYS = [], 3
     for source, url in RSS_FEEDS.items():
         try:
             feed = feedparser.parse(url)
             for entry in feed.entries[:20]:
-                if hasattr(entry, "title") and entry.title and hasattr(entry, "link") and entry.link:
-                    content = BeautifulSoup(getattr(entry, "summary", ""), "lxml").get_text(separator="\n", strip=True)
-                    if len(content) < 50: continue
-                    all_news.append({"source": source, "title": entry.title, "link": entry.link, "content": content})
+                if not (hasattr(entry, "title") and entry.title and hasattr(entry, "link") and entry.link): continue
+                is_recent = False
+                if hasattr(entry, 'published_parsed') and entry.published_parsed:
+                    article_dt = datetime(*entry.published_parsed[:6])
+                    if datetime.now() - article_dt < timedelta(days=MAX_NEWS_AGE_DAYS):
+                        is_recent = True
+                    else:
+                        logger.info(f"過濾掉過舊 RSS 新聞 (發布於 {article_dt.date()})：{entry.title}")
+                else:
+                    logger.warning(f"RSS 新聞缺少發布日期，予以跳過：{entry.title}")
+                if not is_recent: continue
+                content = BeautifulSoup(getattr(entry, "summary", ""), "lxml").get_text(separator="\n", strip=True)
+                if len(content) < 50: continue
+                all_news.append({"source": source, "title": entry.title, "link": entry.link, "content": content})
         except Exception as e:
             logger.error(f"抓取 {source} RSS 失敗: {e}")
     return all_news
 
 def fetch_html_news():
-    """從 Al Jazeera 靜態 HTML 頁面抓取新聞"""
-    url = "https://www.aljazeera.com/news/"
     all_news = []
+    url = "https://www.aljazeera.com/news/"
     try:
         response = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
         response.raise_for_status()
@@ -143,75 +148,62 @@ def fetch_html_news():
             if title_tag and link_tag:
                 title = title_tag.get_text(strip=True)
                 link = link_tag.get("href", "")
-                if link and not link.startswith("http"):
-                    link = f"https://www.aljazeera.com{link}"
-                try:
-                    content_page_res = requests.get(link, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
-                    content_soup = BeautifulSoup(content_page_res.text, "html.parser")
-                    content_div = content_soup.select_one('div.wysiwyg')
-                    if content_div:
-                        content = content_div.get_text(separator="\n", strip=True)[:2000]
-                        all_news.append({"source": "Al Jazeera", "title": title, "link": link, "content": content})
-                except Exception as page_e:
-                    logger.warning(f"無法深入抓取 Al Jazeera 頁面 {link}: {page_e}")
+                if link and not link.startswith("http"): link = f"https://www.aljazeera.com{link}"
+                all_news.append({"source": "Al Jazeera", "title": title, "link": link, "content": title}) # 暫用標題當內容
     except Exception as e:
         logger.error(f"抓取 Al Jazeera 新聞列表失敗: {e}")
     return all_news
 
-def create_classifier_prompt(title: str, content: str) -> str:
-    """為分類任務創建專屬的「範例學習」Prompt。"""
-    prompt = f"""You are a news classification expert. Your task is to classify the following news article by its "Topic" and its "Scope of Impact". Follow the output format of the examples precisely.
-
+def create_batch_classifier_prompt(news_batch: list) -> str:
+    input_articles_str = ""
+    for i, news_item in enumerate(news_batch):
+        content_snippet = news_item.get('content', '')[:500]
+        input_articles_str += f"---\nArticle {i+1}:\nTitle: {news_item['title']}\nContent: {content_snippet}\n"
+    prompt = f"""You are a news classification expert. Your task is to classify each of the following {len(news_batch)} articles.
+For each article, you MUST provide its Topic and Scope on a new line, using the exact format: "Article [index]: Topic: [Topic] | Scope: [Scope]".
+Follow the output format of the examples precisely.
 ---
 **Example 1:**
-**Input Article:**
+Input Article:
 Title: Federal Reserve signals potential interest rate hike amid inflation fears
-Content: The US Federal Reserve hinted at another potential interest rate hike to combat persistent inflation. This move is expected to impact global financial markets...
+Content: The US Federal Reserve hinted at another potential interest rate hike...
 **Output:**
-Topic: 經濟 & 金融
-Scope: 全球性
-
+Article 1: Topic: 經濟 & 金融 | Scope: 全球性
 ---
 **Example 2:**
-**Input Article:**
+Input Article:
 Title: Jury selection begins in high-profile Diddy sex trafficking trial in New York
-Content: Jury selection has started in the highly anticipated sex trafficking trial of music mogul Sean 'Diddy' Combs. The trial, taking place in a New York federal court, is focused on allegations from multiple plaintiffs...
+Content: Jury selection has started in the highly anticipated sex trafficking trial...
 **Output:**
-Topic: 社會 & 人文
-Scope: 國內性
-
+Article 2: Topic: 社會 & 人文 | Scope: 國內性
 ---
-**Article to Classify:**
-**Input Article:**
-Title: {title}
-Content: {content}
-**Output:**
+**Articles to Classify:**
+{input_articles_str.strip()}
+
+**Your Output:**
 """
     return prompt
 
-def create_fusion_prompt(news_list: list) -> str:
-    """為融合摘要任務創建專屬的 Prompt。"""
+def create_fusion_prompt(news_list: list, glossary: dict) -> str:
     input_materials_str = ""
     for i, news_item in enumerate(news_list):
         input_materials_str += f"---\nSource {i+1}: {news_item['source']}\nTitle: {news_item['title']}\nContent: {news_item.get('content', '')}\n"
-    
+    glossary_rules = "\n".join([f"- {en} -> {tw}" for en, tw in glossary.items()])
     prompt = f"""
 # ROLE & GOAL
 You are a top-tier senior editor for a major Taiwanese news outlet, tasked with producing a fast, accurate, and purely objective news brief.
-
+# VOCABULARY & TRANSLATION RULES
+This is a non-negotiable editorial standard. You MUST use the following translations for any mentioned proper nouns:
+{glossary_rules}
 # INPUT MATERIALS
 {input_materials_str.strip()}
 ---
-
 # TASK
-Fuse all information above. Identify the most critical facts to create an accurate overview. Your final output must be a single headline and a single summary paragraph in Traditional Chinese.
-
+Fuse all information above. Your final output must be a single headline and a single summary paragraph in Traditional Chinese.
 # OUTPUT REQUIREMENTS
-1.  **Headline (繁體中文標題):** A single, objective headline.
-2.  **Summary Paragraph (繁體中文摘要):** A single, cohesive paragraph between 80 and 180 characters.
-3.  **Quality (品質):** Use natural, modern Taiwanese Mandarin. No awkward phrases or extra spaces.
-4.  **VOCABULARY (詞彙):** Non-negotiable: All proper nouns must use standard Taiwanese translations (e.g., `Trump` is `川普`, `Gaza` is `加薩`).
-
+1.  Headline: A single, objective headline.
+2.  Summary Paragraph: A single, cohesive paragraph between 80 and 180 characters.
+3.  Quality: Use natural, modern Taiwanese Mandarin. No awkward phrases or extra spaces.
 # FINAL OUTPUT FORMAT
 繁體中文標題: [Your synthesized headline here]
 繁體中文摘要: [Your synthesized summary paragraph here]
@@ -219,11 +211,9 @@ Fuse all information above. Identify the most critical facts to create an accura
     return prompt
 
 def get_ai_response(prompt: str, model: str, temperature: float = None) -> str:
-    """通用的 AI API 呼叫函式。"""
     try:
         request_params = { "model": model, "messages": [{"role": "user", "content": prompt}] }
-        if temperature is not None:
-            request_params["temperature"] = temperature
+        if temperature is not None: request_params["temperature"] = temperature
         response = client.chat.completions.create(**request_params)
         return response.choices[0].message.content.strip()
     except Exception as e:
@@ -231,41 +221,51 @@ def get_ai_response(prompt: str, model: str, temperature: float = None) -> str:
         return ""
 
 def classify_and_filter_news(news_list: list, sent_links: set) -> list:
-    """使用 AI 分類器過濾新聞，並移除已發送過的新聞。"""
-    logger.info("--- 開始執行 AI 分類與初步過濾 ---")
-    
+    logger.info("--- 開始執行 AI 批次分類與初步過濾 ---")
     unsent_news = [news for news in news_list if news.get("link") not in sent_links]
-    logger.info(f"從 {len(news_list)} 則原始新聞中，移除了 {len(news_list) - len(unsent_news)} 則已發送過的新聞。")
+    if not unsent_news: return []
+    
+    batches = [unsent_news[i:i + CLASSIFIER_BATCH_SIZE] for i in range(0, len(unsent_news), CLASSIFIER_BATCH_SIZE)]
+    logger.info(f"待分類新聞共 {len(unsent_news)} 則，分為 {len(batches)} 個批次處理。")
+    
+    classified_news = {}
+    for i, batch in enumerate(batches):
+        logger.info(f"正在處理第 {i+1}/{len(batches)} 批次...")
+        prompt = create_batch_classifier_prompt(batch)
+        response_text = get_ai_response(prompt, model="mistralai/mistral-7b-instruct", temperature=0.1)
+        if not response_text: continue
+        
+        pattern = re.compile(r"Article\s+(\d+):\s*Topic:(.*?)\|.*?Scope:(.*)")
+        for line in response_text.split('\n'):
+            match = pattern.search(line)
+            if match:
+                try:
+                    article_index, scope_raw = int(match.group(1)) - 1, match.group(3).strip()
+                    if 0 <= article_index < len(batch):
+                        news_item = batch[article_index]
+                        news_item['scope_raw'] = scope_raw
+                        classified_news[news_item['link']] = news_item
+                except (ValueError, IndexError): continue
+        time.sleep(1)
+
+    logger.info(f"AI 分類完成，共 {len(classified_news)} 則新聞獲得了分類標籤。")
     
     filtered_news = []
-    for news in unsent_news:
-        prompt = create_classifier_prompt(news['title'], news.get('content', '')[:1000])
-        response_text = get_ai_response(prompt, model="mistralai/mistral-7b-instruct", temperature=0.1)
-        
-        if not response_text:
-            logger.warning(f"分類器未回傳內容，跳過新聞: {news['title']}")
-            continue
-
-        scope = "解析失敗"
+    for news in classified_news.values():
+        scope, scope_raw, scope_raw_lower = "解析失敗", news.get('scope_raw', ''), news.get('scope_raw', '').lower()
         global_keywords, regional_keywords, domestic_keywords = ['global', '全球性', '國際性'], ['regional', '區域性', '局部性', '國外', '地區', '區域', 'european'], ['domestic', '國內性']
-        is_global = any(keyword in response_text for keyword in global_keywords)
-        is_regional = any(keyword in response_text or keyword in response_text.lower() for keyword in regional_keywords)
-        is_domestic = any(keyword in response_text.lower() or keyword in response_text for keyword in domestic_keywords)
-
-        if is_global: scope = '全球性 (Global)'
-        elif is_regional: scope = '區域性 (Regional)'
-        elif is_domestic: scope = '國內性 (Domestic)'
+        
+        if any(k in scope_raw for k in global_keywords): scope = '全球性 (Global)'
+        elif any(k in scope_raw or k in scope_raw_lower for k in regional_keywords): scope = '區域性 (Regional)'
+        elif any(k in scope_raw_lower or k in scope_raw for k in domestic_keywords): scope = '國內性 (Domestic)'
         
         if scope in ['全球性 (Global)', '區域性 (Regional)']:
             filtered_news.append(news)
-        
-        time.sleep(1)
-        
+            
     logger.info(f"過濾後，剩下 {len(filtered_news)} 則具有全球或區域影響力的重要新聞。")
     return filtered_news
 
-def process_news(news_list: list) -> list:
-    """對過濾後的新聞進行分組、排序、AI摘要與後處理。"""
+def process_news(news_list: list, glossary: dict) -> list:
     if not news_list: return []
     
     grouped_news = []
@@ -292,7 +292,7 @@ def process_news(news_list: list) -> list:
 
     final_processed_news = []
     for news_group in selected_groups_for_push:
-        fusion_prompt = create_fusion_prompt(news_group)
+        fusion_prompt = create_fusion_prompt(news_group, glossary)
         ai_response_text = get_ai_response(fusion_prompt, model="qwen/qwen-2-72b-instruct", temperature=0.6)
         if not ai_response_text: continue
             
@@ -312,47 +312,33 @@ def process_news(news_list: list) -> list:
     return final_processed_news
 
 def run_news_pipeline():
-    """【URL直接存取版】完整新聞管線，確保操作正確的試算表。"""
     logger.info("="*20 + " 啟動新聞處理管線 " + "="*20)
-    
     gs_client = get_gspread_client()
     if not gs_client:
-        logger.error("無法繼續執行，因 Google Sheet 客戶端初始化失敗。")
-        return
+        logger.error("無法繼續執行，因 Google Sheet 客戶端初始化失敗。"); return
 
-    # 【核心修改】不再透過名稱搜尋，而是直接用 URL 打開
     try:
-        logger.info(f"正在嘗試透過 URL 直接開啟 Google Sheet...")
         spreadsheet = gs_client.open_by_url(GOOGLE_SHEET_URL)
-        worksheet = spreadsheet.worksheet("sent_news_log")
-        logger.info(f"成功透過 URL 開啟試算表: {spreadsheet.title}")
+        log_worksheet = spreadsheet.worksheet("sent_news_log")
+        translation_glossary = get_translation_glossary(spreadsheet)
     except Exception as e:
-        logger.error(f"透過 URL 開啟 Google Sheet 失敗！請檢查 URL 是否正確，以及服務帳戶是否有此試算表的編輯權限。錯誤: {e}")
-        # 將錯誤向上拋出，以便在 Cloud Run 日誌中看到詳細資訊
-        raise e
-
-    # 步驟三：讀取歷史連結
-    sent_links_set = get_sent_links(worksheet)
+        logger.error(f"開啟 Google Sheet 或讀取工作表失敗: {e}"); return
     
-    # 步驟四：抓取所有新聞
+    sent_links_set = get_sent_links(log_worksheet)
+    
     all_raw_news = []
     all_raw_news.extend(fetch_rss_news())
     all_raw_news.extend(fetch_html_news())
     logger.info(f"【抓取階段完成】共抓取到 {len(all_raw_news)} 則原始新聞。")
 
-    # 步驟五：分類與過濾
     important_news = classify_and_filter_news(all_raw_news, sent_links_set)
-    
-    # 步驟六：摘要與處理
-    processed_news_list = process_news(important_news)
+    processed_news_list = process_news(important_news, translation_glossary)
     
     if not processed_news_list:
-        logger.warning("沒有可供推播的新聞。")
-        logger.info("="*22 + " 管線執行完畢 " + "="*22)
-        return
+        logger.warning("沒有可供推播的新聞。"); logger.info("="*22 + " 管線執行完畢 " + "="*22"); return
 
-    # 步驟七：發送至 LINE
     logger.info(f"準備推播 {len(processed_news_list)} 則新聞摘要...")
+    
     tz = timezone(timedelta(hours=+8))
     now = datetime.now(tz)
     hour = now.hour
@@ -364,8 +350,7 @@ def run_news_pipeline():
         line_bot_api.push_message(PushMessageRequest(to=USER_ID, messages=[TextMessage(text=header)]))
         time.sleep(1)
     except Exception as e:
-        logger.error(f"推送標頭至 LINE 失敗: {e}")
-        return
+        logger.error(f"推送標頭至 LINE 失敗: {e}"); return
 
     for i, item in enumerate(processed_news_list):
         message_text = f"【{item['title']}】\n\n{item['summary']}\n\n{item['link']}"
@@ -376,11 +361,8 @@ def run_news_pipeline():
         except Exception as e:
             logger.error(f"推送第 {i+1} 則新聞至 LINE 失敗: {e}")
     
-    # 步驟八：記錄到 Google Sheet
-    log_sent_news(worksheet, processed_news_list)
-
-    logger.info("所有新聞推送完成！")
-    logger.info("="*22 + " 管線執行完畢 " + "="*22)
+    log_sent_news(log_worksheet, processed_news_list)
+    logger.info("所有新聞推送完成！"); logger.info("="*22 + " 管線執行完畢 " + "="*22)
 
 # ==============================================================================
 # 2. Flask App 定義 (Gunicorn 的進入點)
@@ -390,21 +372,13 @@ app = Flask(__name__)
 
 @app.route("/", methods=["POST", "GET"])
 def main_handler():
-    """【終極除錯版】捕捉詳細錯誤並直接回傳。"""
     try:
         run_news_pipeline()
         return "Pipeline executed successfully.", 200
     except Exception as e:
-        # 捕捉完整的 Traceback 字串
         error_traceback = traceback.format_exc()
-        
-        # 在日誌中記錄更詳細的錯誤，方便我們查看
         logger.error(f"FATAL ERROR during pipeline execution:\n{error_traceback}")
-        
-        # 將詳細錯誤訊息作為 HTTP 回應的一部分傳回，以便在 Scheduler 日誌中看到
-        # 限制長度以避免超過 HTTP 回應大小限制
         return f"An internal error occurred:\n{error_traceback[:4000]}", 500
-
 
 # ==============================================================================
 # 3. 本地端執行入口 (直接用 python main.py 執行)
