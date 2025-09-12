@@ -1,0 +1,103 @@
+# ============================================================================
+# LINE Bot 新聞推播系統設定檔
+# ============================================================================
+
+# 基本設定
+app:
+  name: "LINE News Bot"
+  version: "2.0.0"
+  timezone: "Asia/Taipei"
+  log_level: "INFO"
+
+# 新聞來源設定
+news_sources:
+  rss_feeds:
+    BBC: "https://feeds.bbci.co.uk/news/world/rss.xml"
+    CNN: "http://rss.cnn.com/rss/edition_world.rss"
+    Fox_News: "https://moxie.foxnews.com/google-publisher/world.xml"
+    Reuters: "http://feeds.reuters.com/reuters/worldnews"
+  
+  html_sources:
+    Al_Jazeera:
+      url: "https://www.aljazeera.com/news/"
+      selector: 'article.gc.u-clickable-card'
+      title_selector: 'h3.gc__title a span'
+      link_selector: 'h3.gc__title a'
+      content_selector: 'div.wysiwyg'
+      max_articles: 15
+
+# AI 模型設定
+ai_models:
+  classification:
+    name: "mistralai/mistral-7b-instruct"
+    temperature: 0.1
+    max_tokens_per_article: 30
+    timeout: 60
+  
+  summarization:
+    name: "qwen/qwen-2-72b-instruct"
+    temperature: 0.6
+    max_tokens: 500
+    timeout: 90
+
+# 分類器設定
+classifier:
+  max_concurrent: 5
+  batch_size: 8
+  max_retries: 3
+  retry_delay: 1.0
+  scope_keywords:
+    global: ["global", "全球性", "國際性", "worldwide", "international"]
+    regional: ["regional", "區域性", "局部性", "國外", "地區", "區域", "european", "asian", "african"]
+    domestic: ["domestic", "國內性", "local", "national"]
+
+# 新聞處理設定
+news_processing:
+  max_news_per_source: 20
+  min_content_length: 50
+  max_content_preview: 2000
+  similarity_threshold: 0.7
+  max_groups_to_process: 5
+  max_news_per_source_in_final: 2
+  max_final_news: 5
+
+# HTTP 請求設定
+http:
+  timeout: 15
+  max_retries: 3
+  retry_delay: 1.0
+  user_agent: "Mozilla/5.0 (compatible; NewsBot/2.0)"
+  
+# Google Sheets 設定
+google_sheets:
+  worksheets:
+    sent_news_log: "sent_news_log"
+    glossary: "glossary"
+  glossary_columns:
+    english_term: "English_Term"
+    taiwan_term: "Taiwan_Term"
+
+# LINE Bot 設定
+line_bot:
+  message_delay: 1.0
+  header_templates:
+    morning: "🆕 {date} 晨間國際新聞推播"
+    afternoon: "🆕 {date} 午間國際新聞推播"
+    evening: "🆕 {date} 晚間國際新聞推播"
+  time_periods:
+    morning: [5, 12]
+    afternoon: [12, 18]
+    evening: [18, 5]
+
+# 術語替換設定 (fallback)
+default_translations:
+  "特朗普": "川普"
+  "加沙": "加薩"
+  "內塔尼亞胡": "納坦雅胡"
+  "哈梅內伊": "哈米尼"
+
+# Cloud Run 最佳化設定
+cloud_run:
+  max_execution_time: 540  # 9分鐘 (Cloud Run 預設 15分鐘的緩衝)
+  memory_limit_mb: 512
+  cpu_limit: 1.0
