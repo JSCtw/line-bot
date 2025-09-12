@@ -241,7 +241,7 @@ Fuse all information above. Identify the most critical facts to create an accura
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=if=retry_if_exception_type((Exception,))
+        retry=retry_if_exception_type((Exception,))
     )
     def _call_ai_api(self, prompt: str) -> str:
         """呼叫 AI API 生成回應"""

@@ -26,7 +26,7 @@ from dotenv import load_dotenv
 from flask import Flask
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-from core.config_manager import ConfigManager
+from utils.config_manager import ConfigManager
 from core.news_fetcher import NewsFetcher
 from core.news_classifier import OptimizedNewsClassifier
 from core.news_processor import NewsProcessor
