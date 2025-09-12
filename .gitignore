@@ -12,10 +12,10 @@ env/
 
 # Dotenv
 .env
+.env.backup
 
 #雲端金鑰
 gcp_credentials.json
 
 # IDE/Editor files
 .vscode/
-.idea/
