@@ -12,8 +12,8 @@ from typing import Dict, List, Set, Optional, Any
 from concurrent.futures import ThreadPoolExecutor
 
 import gspread
-import google.auth
 from google.oauth2.service_account import Credentials
+from google.auth.exceptions import DefaultCredentialsError
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 logger = logging.getLogger(__name__)
@@ -53,18 +53,20 @@ class SheetManager:
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=4, max=10),
-        retry=retry_if_exception_type((Exception,))
+        retry=retry_if_exception_type((DefaultCredentialsError, gspread.exceptions.APIError))
     )
     def _sync_initialize(self) -> None:
         """同步的初始化邏輯"""
         try:
-            # 使用應用程式預設憑證 (ADC) 進行驗證
-            creds, _ = google.auth.default(
-                scopes=[
-                    "https://spreadsheets.google.com/feeds",
-                    "https://www.googleapis.com/auth/drive"
-                ]
+            # 讀取位於專案根目錄的憑證檔案
+            creds_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'gcp_credentials.json')
+            
+            # 使用 Credentials 類別直接載入，任何錯誤都會被外部捕捉
+            creds = Credentials.from_service_account_file(
+                creds_path,
+                scopes=['https://www.googleapis.com/auth/spreadsheets']
             )
+            
             self.client = gspread.authorize(creds)
             
             # 開啟試算表

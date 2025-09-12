@@ -34,6 +34,11 @@ from core.line_notifier import LineNotifier
 from core.sheet_manager import SheetManager
 from utils.logger import setup_logger
 
+#設定 Google 服務帳戶憑證
+import gspread
+# 載入憑證
+gc = gspread.service_account(filename='gcp_credentials.json')
+
 # ==============================================================================
 # 全域設定與初始化
 # ==============================================================================
