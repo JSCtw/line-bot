@@ -35,7 +35,7 @@ ai_models:
     timeout: 60
   
   summarization:
-    name: "qwen/qwen-2-72b-instruct"
+    name: "google/gemma-3-12b-it" # Updated to the correct model name
     temperature: 0.6
     max_tokens: 500
     timeout: 90

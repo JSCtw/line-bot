@@ -13,47 +13,32 @@ from typing import Dict, List, Any, Optional
 from difflib import SequenceMatcher
 from concurrent.futures import ThreadPoolExecutor
 
-from openai import OpenAI
+from utils.http_client import AsyncHTTPClient
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+
+# 假設你已將 http_client 匯入到 utils/__init__.py
+from utils.logger import log_async_execution_time
 
 logger = logging.getLogger(__name__)
 
 class NewsProcessor:
     """新聞處理器 - 負責摘要生成與後處理"""
     
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], http_client: AsyncHTTPClient, sheet_manager: Any):
         self.config = config
-        self.processing_config = config.get('news_processing', {})
+        self.http_client = http_client
+        self.sheet_manager = sheet_manager
+        
+        # 讀取摘要模型的設定
         self.ai_config = config.get('ai_models', {}).get('summarization', {})
         
-        # 初始化 OpenAI 客戶端
-        self._initialize_openai_client()
-        
         # 處理參數
+        self.processing_config = config.get('news_processing', {})
         self.max_groups_to_process = self.processing_config.get('max_groups_to_process', 5)
         self.max_news_per_source = self.processing_config.get('max_news_per_source_in_final', 2)
         self.similarity_threshold = self.processing_config.get('similarity_threshold', 0.7)
         
-        # 線程池用於 AI API 呼叫
-        self.executor = ThreadPoolExecutor(max_workers=3)
-    
-    def _initialize_openai_client(self) -> None:
-        """初始化 OpenAI 客戶端"""
-        try:
-            import os
-            api_key = os.getenv("OPENROUTER_API_KEY")
-            if not api_key:
-                raise ValueError("OPENROUTER_API_KEY 環境變數未設定")
-            
-            self.openai_client = OpenAI(
-                base_url="https://openrouter.ai/api/v1",
-                api_key=api_key,
-            )
-            logger.info("✅ OpenAI 客戶端初始化成功")
-        except Exception as e:
-            logger.error(f"❌ OpenAI 客戶端初始化失敗: {e}")
-            raise
-    
+    @log_async_execution_time()
     async def process_news(self, news_list: List[Dict], glossary: Dict[str, str]) -> List[Dict]:
         """
         處理新聞列表：分組 -> 排序 -> 摘要生成 -> 後處理
@@ -145,12 +130,8 @@ class NewsProcessor:
             task = self._generate_single_summary(group, glossary)
             tasks.append(task)
         
-        # 並發執行摘要生成，但加入延遲避免 API 限流
         results = []
         for i, task in enumerate(tasks):
-            if i > 0:
-                await asyncio.sleep(1)  # API 呼叫間隔
-            
             try:
                 result = await task
                 if result:
@@ -166,9 +147,10 @@ class NewsProcessor:
             # 建立融合提示
             fusion_prompt = self._create_fusion_prompt(news_group, glossary)
             
-            # 在線程池中呼叫 AI API
-            ai_response = await asyncio.get_event_loop().run_in_executor(
-                self.executor, self._call_ai_api, fusion_prompt
+            # 呼叫 http_client 的 call_ai_api，將所有 AI 參數傳入
+            ai_response = await self.http_client.call_ai_api(
+                prompt=fusion_prompt,
+                **self.ai_config
             )
             
             if not ai_response:
@@ -204,7 +186,7 @@ class NewsProcessor:
         if glossary:
             glossary_items = []
             for en_term, zh_term in glossary.items():
-                glossary_items.append(f"  • {en_term} → {zh_term}")
+                glossary_items.append(f"  • {en_term} → {zh_term}")
             
             glossary_rules = f"""
 # MANDATORY TRANSLATION RULES (必須遵守的翻譯規則)
@@ -237,31 +219,6 @@ Fuse all information above. Identify the most critical facts to create an accura
 """
         
         return prompt
-    
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type((Exception,))
-    )
-    def _call_ai_api(self, prompt: str) -> str:
-        """呼叫 AI API 生成回應"""
-        try:
-            model_name = self.ai_config.get('name', 'qwen/qwen-2-72b-instruct')
-            temperature = self.ai_config.get('temperature', 0.6)
-            max_tokens = self.ai_config.get('max_tokens', 500)
-            
-            response = self.openai_client.chat.completions.create(
-                model=model_name,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=temperature,
-                max_tokens=max_tokens
-            )
-            
-            return response.choices[0].message.content.strip()
-            
-        except Exception as e:
-            logger.error(f"AI API 呼叫失敗: {e}")
-            raise
     
     def _post_process_ai_response(self, ai_response: str, news_group: List[Dict], glossary: Dict[str, str]) -> Dict:
         """後處理 AI 回應"""
@@ -305,7 +262,4 @@ Fuse all information above. Identify the most critical facts to create an accura
         
         return result
     
-    def __del__(self):
-        """清理資源"""
-        if hasattr(self, 'executor'):
-            self.executor.shutdown(wait=False)
+   

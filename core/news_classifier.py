@@ -15,6 +15,8 @@ from concurrent.futures import ThreadPoolExecutor
 import aiohttp
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
+# 假設你已將 http_client 匯入到 utils/__init__.py
+from utils.http_client import AsyncHTTPClient
 from utils.logger import log_async_execution_time
 
 logger = logging.getLogger(__name__)
@@ -22,39 +24,21 @@ logger = logging.getLogger(__name__)
 class OptimizedNewsClassifier:
     """優化的異步新聞分類器"""
     
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], http_client: AsyncHTTPClient):
         self.config = config
-        self.classifier_config = config.get('classifier', {})
+        self.http_client = http_client
         
-        # API 設定
-        self.api_key = os.getenv("OPENROUTER_API_KEY")
-        if not self.api_key:
-            raise ValueError("OPENROUTER_API_KEY 環境變數未設定")
-        
-        self.base_url = "https://openrouter.ai/api/v1/chat/completions"
-        self.headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
+        # 讀取分類模型的設定
+        self.ai_config = self.config.get("ai_models", {}).get("classification", {})
         
         # 分類器參數
+        self.classifier_config = config.get('classifier', {})
         self.max_concurrent = self.classifier_config.get('max_concurrent', 5)
         self.batch_size = self.classifier_config.get('batch_size', 8)
-        self.max_retries = self.classifier_config.get('max_retries', 3)
-        self.retry_delay = self.classifier_config.get('retry_delay', 1.0)
-        
-        # AI 模型設定
-        self.ai_config = config.get('ai_models', {}).get('classification', {})
-        self.model_name = self.ai_config.get('name', 'mistralai/mistral-7b-instruct')
-        self.temperature = self.ai_config.get('temperature', 0.1)
-        self.timeout = self.ai_config.get('timeout', 60)
         
         # 分類關鍵詞
         self.scope_keywords = self.classifier_config.get('scope_keywords', {})
         
-        # 線程池（備用）
-        self.executor = ThreadPoolExecutor(max_workers=3)
-    
     @log_async_execution_time()
     async def classify_and_filter(self, news_list: List[Dict], sent_links: Set[str]) -> List[Dict]:
         """
@@ -100,54 +84,43 @@ class OptimizedNewsClassifier:
         ]
         
         logger.info(f"🔄 分為 {len(batches)} 批，每批最多 {self.batch_size} 則")
-        logger.info(f"⚙️ 並發數: {self.max_concurrent}")
         
         all_results = []
         
-        # 使用連線器控制並發
-        connector = aiohttp.TCPConnector(limit=self.max_concurrent)
-        timeout = aiohttp.ClientTimeout(total=self.timeout)
+        # 創建任務
+        tasks = [
+            self._classify_single_batch(i, batch) 
+            for i, batch in enumerate(batches)
+        ]
         
-        async with aiohttp.ClientSession(
-            headers=self.headers, 
-            connector=connector,
-            timeout=timeout
-        ) as session:
-            
-            # 創建任務
-            tasks = [
-                self._classify_single_batch(session, i, batch) 
-                for i, batch in enumerate(batches)
-            ]
-            
-            # 並發執行
-            batch_results_list = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            # 處理結果
-            for i, result in enumerate(batch_results_list):
-                if isinstance(result, Exception):
-                    logger.error(f"❌ 第 {i+1} 批分類失敗: {result}")
-                    # 為失敗的批次創建預設結果
-                    failed_batch = batches[i]
-                    default_results = [
-                        {"news": news, "topic": "未知", "scope_raw": "未知"} 
-                        for news in failed_batch
-                    ]
-                    all_results.extend(default_results)
-                elif isinstance(result, list):
-                    all_results.extend(result)
+        # 使用 aiohttp 的並發限制
+        semaphore = asyncio.Semaphore(self.max_concurrent)
+        
+        async def _run_with_semaphore(task):
+            async with semaphore:
+                return await task
+
+        batch_results_list = await asyncio.gather(*(_run_with_semaphore(task) for task in tasks), return_exceptions=True)
+        
+        # 處理結果
+        for i, result in enumerate(batch_results_list):
+            if isinstance(result, Exception):
+                logger.error(f"❌ 第 {i+1} 批分類失敗: {result}")
+                failed_batch = batches[i]
+                default_results = [
+                    {"news": news, "topic": "未知", "scope_raw": "未知"} 
+                    for news in failed_batch
+                ]
+                all_results.extend(default_results)
+            elif isinstance(result, list):
+                all_results.extend(result)
         
         end_time = time.time()
         logger.info(f"🎯 批次分類完成！耗時 {end_time - start_time:.2f} 秒")
         
         return all_results
     
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type((aiohttp.ClientError, asyncio.TimeoutError))
-    )
-    async def _classify_single_batch(self, session: aiohttp.ClientSession, batch_index: int, batch: List[Dict]) -> List[Dict]:
+    async def _classify_single_batch(self, batch_index: int, batch: List[Dict]) -> List[Dict]:
         """分類單一批次"""
         logger.info(f"🔄 處理第 {batch_index + 1} 批，共 {len(batch)} 則新聞")
         
@@ -155,26 +128,19 @@ class OptimizedNewsClassifier:
             # 建立分類提示
             prompt = self._create_batch_classification_prompt(batch)
             
-            # 準備 API 請求
-            payload = {
-                "model": self.model_name,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": self.temperature,
-                "max_tokens": len(batch) * 35  # 每則新聞預留35 token
-            }
+            # 呼叫 http_client 的 call_ai_api，將所有 AI 參數傳入
+            # `self.ai_config` 包含了 model, temperature, max_tokens 等參數
+            response_text = await self.http_client.call_ai_api(
+                prompt=prompt,
+                **self.ai_config
+            )
             
-            # 發送請求
-            async with session.post(self.base_url, json=payload) as response:
-                response.raise_for_status()
-                result_json = await response.json()
-                
-                # 解析回應
-                response_text = result_json['choices'][0]['message']['content'].strip()
-                parsed_results = self._parse_batch_response(response_text, batch)
-                
-                logger.info(f"✅ 第 {batch_index + 1} 批分類完成")
-                return parsed_results
-                
+            # 解析回應
+            parsed_results = self._parse_batch_response(response_text, batch)
+            
+            logger.info(f"✅ 第 {batch_index + 1} 批分類完成")
+            return parsed_results
+            
         except Exception as e:
             logger.error(f"❌ 第 {batch_index + 1} 批分類失敗: {e}")
             raise
@@ -313,18 +279,9 @@ Article 2: Topic: 軍事 & 安全 | Scope: 區域性
     async def classify_single_news(self, news_item: Dict) -> Dict:
         """分類單則新聞（用於測試）"""
         try:
-            connector = aiohttp.TCPConnector(limit=1)
-            timeout = aiohttp.ClientTimeout(total=self.timeout)
+            result = await self._classify_single_batch(0, [news_item])
+            return result[0] if result else {"news": news_item, "topic": "未知", "scope_raw": "未知"}
             
-            async with aiohttp.ClientSession(
-                headers=self.headers,
-                connector=connector,
-                timeout=timeout
-            ) as session:
-                
-                result = await self._classify_single_batch(session, 0, [news_item])
-                return result[0] if result else {"news": news_item, "topic": "未知", "scope_raw": "未知"}
-                
         except Exception as e:
             logger.error(f"❌ 單則新聞分類失敗: {e}")
             return {"news": news_item, "topic": "未知", "scope_raw": "未知"}
@@ -332,14 +289,16 @@ Article 2: Topic: 軍事 & 安全 | Scope: 區域性
     def get_classification_stats(self) -> Dict[str, Any]:
         """獲取分類器統計資訊"""
         return {
-            'model_name': self.model_name,
+            'model_name': self.ai_config.get('name'),
             'max_concurrent': self.max_concurrent,
             'batch_size': self.batch_size,
-            'max_retries': self.max_retries,
-            'temperature': self.temperature
+            'max_retries': self.ai_config.get('max_retries', 3), # 注意: 這裡需要確保 config 裡有這項
+            'temperature': self.ai_config.get('temperature')
         }
     
     def __del__(self):
         """清理資源"""
+        # 注意: 這邊的 executor 已經不再使用，因為改用 http_client
+        # 這裡可以移除，或保留以防未來需要
         if hasattr(self, 'executor'):
             self.executor.shutdown(wait=False)
