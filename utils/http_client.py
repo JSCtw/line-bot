@@ -143,8 +143,7 @@ class AsyncHTTPClient:
             logger.warning(f"⚠️ Async GET text 失敗: {url} - {e}")
             raise
 
-    # 核心修正：移除了導致 TypeError 的 @log_async_execution_time 裝飾器
-    # @log_async_execution_time
+        # @log_async_execution_time
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=2, min=4, max=30),
@@ -156,53 +155,53 @@ class AsyncHTTPClient:
         api_key = os.getenv("OPENROUTER_API_KEY")
         if not api_key:
             raise ValueError("環境變數 OPENROUTER_API_KEY 未設定")
-        
+
         api_base = self.ai_config.get("api_base", "https://openrouter.ai/api/v1")
         
         headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
             "HTTP-Referer": self.ai_config.get("referer", "http://localhost"),
             "X-Title": self.ai_config.get("x_title", "LINE News Bot")
         }
         
-        # 從 kwargs 中提取 AI 模型參數，其餘的作為 aiohttp 參數
         ai_params = ["model", "temperature", "max_tokens", "top_p", "stream"]
         payload = {"messages": [{"role": "user", "content": prompt}]}
         for param in ai_params:
             if param in kwargs:
                 payload[param] = kwargs[param]
 
-        request_timeout = payload.get('max_tokens', 2048) / 200 + 15 # 根據 max_tokens 動態估算 timeout
+        # 檢查 model 是否真的被加入了
+        if "model" not in payload:
+            logger.error(f"請求 Payload 中缺少必要的 'model' 參數！請檢查 config.yaml 的拼寫（應為全小寫）。傳入的參數: {kwargs.keys()}")
+            raise ValueError("請求 Payload 中缺少 'model' 參數")
+
+        logger.info(f"準備發送 AI API 請求至模型: {payload.get('model')}")
+        logger.debug(f"完整 Payload:\n{json.dumps(payload, indent=2, ensure_ascii=False)}")
         
         try:
             async with session.post(
-                f"{api_base}/chat/completions", 
-                headers=headers, 
-                json=payload, 
-                timeout=aiohttp.ClientTimeout(total=request_timeout)
+                f"{api_base}/chat/completions", headers=headers, json=payload, 
+                timeout=aiohttp.ClientTimeout(total=self.ai_config.get('timeout', 180))
             ) as response:
+                response_content = await response.json()
                 response.raise_for_status()
-                response_json = await response.json()
                 
-                response_text = response_json.get("choices", [{}])[0].get("message", {}).get("content")
+                response_text = response_content.get("choices", [{}])[0].get("message", {}).get("content")
                 if not response_text:
-                    logger.error(f"❌ AI API 回應內容為空: {response_json}")
+                    logger.error(f"❌ AI API 回應內容為空: {response_content}")
                     raise ValueError("AI API 回應內容為空")
                 
                 return response_text.strip()
                 
         except ClientResponseError as e:
             logger.error(f"❌ AI API HTTP 錯誤: {e.status} {e.message}")
-            try:
-                error_body = await e.text()
-                logger.error(f"詳細錯誤內容: {error_body}")
-            except Exception:
-                pass
+            # 修正：aiohttp 的 ClientResponseError 沒有 .text()，但我們可以從 response_content 獲取內容
+            logger.error(f"❌ API Server Response Body:\n{response_content}")
             raise
         except Exception as e:
             logger.error(f"❌ 呼叫 AI API 時發生未知錯誤: {e}", exc_info=True)
             raise
+
     
     async def close(self):
         """優雅地關閉 session 和 connector"""
