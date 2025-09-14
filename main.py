@@ -3,7 +3,7 @@
 LINE Bot 新聞推播系統 - 優化版 v2.0
 主要改進：
 1. 模組化架構
-2. 指數退避重試機制  
+2. 指數退避重試機制
 3. 術語表整合
 4. 設定檔支援
 5. 異步優化與 timeout 預防
@@ -26,18 +26,15 @@ from dotenv import load_dotenv
 from flask import Flask
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
+# 匯入所有必要的模組
 from utils.config_manager import ConfigManager
+from utils.http_client import AsyncHTTPClient
 from core.news_fetcher import NewsFetcher
 from core.news_classifier import OptimizedNewsClassifier
 from core.news_processor import NewsProcessor
 from core.line_notifier import LineNotifier
 from core.sheet_manager import SheetManager
 from utils.logger import setup_logger
-
-#設定 Google 服務帳戶憑證
-import gspread
-# 載入憑證
-gc = gspread.service_account(filename='gcp_credentials.json')
 
 # ==============================================================================
 # 全域設定與初始化
@@ -60,9 +57,9 @@ except Exception as e:
 
 # 驗證必要環境變數
 required_env_vars = [
-    "OPENROUTER_API_KEY", 
-    "LINE_CHANNEL_ACCESS_TOKEN", 
-    "USER_ID", 
+    "OPENROUTER_API_KEY",
+    "LINE_CHANNEL_ACCESS_TOKEN",
+    "USER_ID",
     "GOOGLE_SHEET_URL"
 ]
 
@@ -77,31 +74,52 @@ if missing_vars and os.getenv("IS_CLOUD_RUN") != "true":
 
 class NewsBot:
     """新聞機器人主控制器 - 統籌所有組件"""
-    
+
     def __init__(self):
         self.config = config
         self.execution_start_time = None
         self.max_execution_time = config['cloud_run']['max_execution_time']
+        self.http_client: Optional[AsyncHTTPClient] = None
+        self.sheet_manager: Optional[SheetManager] = None
+        self.news_fetcher: Optional[NewsFetcher] = None
+        self.news_classifier: Optional[OptimizedNewsClassifier] = None
+        self.news_processor: Optional[NewsProcessor] = None
+        self.line_notifier: Optional[LineNotifier] = None
         
         # 初始化各個組件
         self._initialize_components()
-        
+
         # 設定優雅關閉處理
         self._setup_signal_handlers()
-    
+
     def _initialize_components(self):
         """初始化所有系統組件"""
         try:
+            # 初始化 HTTP 客戶端 (新增)
+            self.http_client = AsyncHTTPClient(self.config)
+
+            # 初始化 Google Sheets 管理器
             self.sheet_manager = SheetManager(self.config)
-            self.news_fetcher = NewsFetcher(self.config)
-            self.news_classifier = OptimizedNewsClassifier(self.config)
-            self.news_processor = NewsProcessor(self.config)
+
+            # 初始化新聞抓取器
+            self.news_fetcher = NewsFetcher(self.config, self.http_client)
+
+            # 初始化新聞分類器 (傳入 http_client)
+            self.news_classifier = OptimizedNewsClassifier(self.config, self.http_client)
+
+            # 初始化新聞處理器 (傳入 http_client 和 sheet_manager)
+            self.news_processor = NewsProcessor(self.config, self.http_client, self.sheet_manager)
+            
+            # 初始化 LINE 通知器
             self.line_notifier = LineNotifier(self.config)
+            
+            # 建立完成
             logger.info("所有系統組件初始化成功")
+
         except Exception as e:
-            logger.error(f"系統組件初始化失敗: {e}")
+            logger.error(f"系統組件初始化失敗: {e}", exc_info=True)
             raise
-    
+
     def _setup_signal_handlers(self):
         """設定信號處理器以優雅關閉"""
         def signal_handler(signum, frame):
@@ -111,7 +129,7 @@ class NewsBot:
         
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
-    
+
     def _graceful_shutdown(self):
         """優雅關閉處理"""
         logger.info("正在進行優雅關閉...")
@@ -121,7 +139,7 @@ class NewsBot:
         """檢查是否接近執行時間上限"""
         if not self.execution_start_time:
             return True
-            
+        
         elapsed = time.time() - self.execution_start_time
         remaining = self.max_execution_time - elapsed
         
@@ -130,7 +148,7 @@ class NewsBot:
             return False
         
         return True
-    
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=4, max=10),
@@ -232,22 +250,26 @@ class NewsBot:
 # ==============================================================================
 
 app = Flask(__name__)
-news_bot = NewsBot()
+# news_bot 實例應在處理請求時創建，以確保所有資源正確初始化
+# 這裡先不創建全域實例
 
+@asynccontextmanager
+async def lifespan(app):
+    """應用程式生命週期管理"""
+    global news_bot
+    news_bot = NewsBot()
+    yield
+    # 在應用程式關閉時清理資源
+    if news_bot.http_client:
+        await news_bot.http_client.close()
+
+# Flask 3.0 開始支援異步函數作為路由處理器
 @app.route("/", methods=["GET", "POST"])
-def main_handler():
+async def main_handler():
     """主要的 HTTP 處理端點"""
     try:
-        # 在新的事件循環中執行異步流水線
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        try:
-            results = loop.run_until_complete(news_bot.run_pipeline())
-            return _format_response(results), 200 if results['success'] else 500
-        finally:
-            loop.close()
-            
+        results = await news_bot.run_pipeline()
+        return _format_response(results), 200 if results['success'] else 500
     except Exception as e:
         error_msg = f"Critical error in main handler: {str(e)}\n{traceback.format_exc()[:4000]}"
         logger.error(error_msg)
@@ -261,7 +283,7 @@ def _format_response(results: Dict) -> str:
 {status} - News Pipeline Execution Report
 =====================================
 • Processed: {results['processed_count']} articles
-• Sent: {results['sent_count']} messages  
+• Sent: {results['sent_count']} messages
 • Execution Time: {results['execution_time']:.2f}s
 • Max Time Limit: {news_bot.max_execution_time}s
 """
@@ -269,7 +291,7 @@ def _format_response(results: Dict) -> str:
     if results['errors']:
         response += f"\n• Errors: {len(results['errors'])}\n"
         for error in results['errors']:
-            response += f"  - {error}\n"
+            response += f"  - {error}\n"
     
     return response.strip()
 
@@ -288,7 +310,9 @@ def health_check():
 
 if __name__ == "__main__":
     logger.info("🔧 偵測到本地執行模式")
+    # 這裡的 news_bot 需要在本地執行時被初始化
     try:
+        news_bot = NewsBot()
         # 建立新的事件循環並執行
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
