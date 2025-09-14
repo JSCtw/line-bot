@@ -1,197 +1,45 @@
-# -*- coding: utf-8 -*-
-"""
-統一日誌設定模組
-提供結構化日誌配置與不同環境的日誌級別
-"""
+# utils/logger.py 
 
 import logging
-import os
-import sys
-from typing import Optional
+import time
+import functools
 
-def setup_logger(
-    name: Optional[str] = None,
-    level: Optional[str] = None,
-    format_style: str = 'structured'
-) -> logging.Logger:
+# 假設您的 logger 設定也在這個檔案中
+# 如果不在，請確保 logging 被正確匯入
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(name)s | %(levelname)s | %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+)
+
+def get_logger(name):
+    return logging.getLogger(name)
+
+# --- 這是需要修正的裝飾器 ---
+def log_async_execution_time(task_name: str = ""):
     """
-    設定並返回 logger 實例
-    
-    Args:
-        name: logger 名稱，預設為 __name__
-        level: 日誌級別，預設從環境變數或設定檔讀取
-        format_style: 格式風格 ('structured' 或 'simple')
-    
-    Returns:
-        配置好的 logger 實例
+    一個功能更強大的異步函式執行時間紀錄裝飾器。
+    它能自動使用被裝飾的函式名稱作為任務名，並正確處理所有參數。
     """
-    
-    # 確定 logger 名稱
-    if name is None:
-        name = __name__
-    
-    # 取得或建立 logger
-    logger = logging.getLogger(name)
-    
-    # 避免重複配置
-    if logger.handlers:
-        return logger
-    
-    # 確定日誌級別
-    if level is None:
-        level = _determine_log_level()
-    
-    logger.setLevel(getattr(logging, level.upper()))
-    
-    # 建立處理器
-    handler = _create_handler()
-    
-    # 設定格式器
-    formatter = _create_formatter(format_style)
-    handler.setFormatter(formatter)
-    
-    # 加入處理器到 logger
-    logger.addHandler(handler)
-    
-    # 防止向上傳播（避免重複輸出）
-    logger.propagate = False
-    
-    return logger
-
-def _determine_log_level() -> str:
-    """確定日誌級別"""
-    # 1. 檢查環境變數
-    env_level = os.getenv('LOG_LEVEL')
-    if env_level:
-        return env_level
-    
-    # 2. 根據執行環境決定
-    if os.getenv('IS_CLOUD_RUN') == 'true':
-        return 'INFO'  # Cloud Run 環境
-    elif os.getenv('FLASK_ENV') == 'development':
-        return 'DEBUG'  # 開發環境
-    else:
-        return 'INFO'  # 預設
-
-def _create_handler() -> logging.Handler:
-    """建立日誌處理器"""
-    # Cloud Run 環境使用 stdout，本地環境也用 stdout 方便查看
-    handler = logging.StreamHandler(sys.stdout)
-    return handler
-
-def _create_formatter(format_style: str) -> logging.Formatter:
-    """建立日誌格式器"""
-    
-    if format_style == 'structured':
-        # 結構化格式，適合 Cloud Run 和生產環境
-        format_str = (
-            '%(asctime)s | %(name)s | %(levelname)s | '
-            '%(funcName)s:%(lineno)d | %(message)s'
-        )
-        date_format = '%Y-%m-%d %H:%M:%S'
-        
-    else:  # simple
-        # 簡單格式，適合開發環境
-        format_str = '%(asctime)s - %(levelname)s - %(message)s'
-        date_format = '%H:%M:%S'
-    
-    return logging.Formatter(format_str, datefmt=date_format)
-
-def configure_third_party_loggers(level: str = 'WARNING'):
-    """配置第三方套件的日誌級別，減少噪音"""
-    third_party_loggers = [
-        'urllib3.connectionpool',
-        'requests.packages.urllib3',
-        'googleapiclient.discovery',
-        'google.auth.transport.requests',
-        'openai',
-        'httpx',
-        'aiohttp.access'
-    ]
-    
-    for logger_name in third_party_loggers:
-        logging.getLogger(logger_name).setLevel(getattr(logging, level.upper()))
-
-# 全域日誌配置函數
-def setup_global_logging(level: str = 'INFO'):
-    """設定全域日誌配置"""
-    # 設定根 logger
-    root_logger = logging.getLogger()
-    root_logger.setLevel(getattr(logging, level.upper()))
-    
-    # 清除現有處理器
-    for handler in root_logger.handlers[:]:
-        root_logger.removeHandler(handler)
-    
-    # 加入新處理器
-    handler = _create_handler()
-    formatter = _create_formatter('structured')
-    handler.setFormatter(formatter)
-    root_logger.addHandler(handler)
-    
-    # 配置第三方日誌
-    configure_third_party_loggers()
-    
-    logging.info(f"全域日誌配置完成，級別: {level}")
-
-# 便利函數：為特定模組建立 logger
-def get_module_logger(module_name: str) -> logging.Logger:
-    """為特定模組建立 logger"""
-    return setup_logger(module_name)
-
-# 性能監控日誌裝飾器
-def log_execution_time(logger: logging.Logger = None):
-    """日誌裝飾器：記錄函數執行時間"""
-    import time
-    from functools import wraps
-    
     def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            start_time = time.time()
-            
-            # 使用提供的 logger 或建立新的
-            log = logger or setup_logger(func.__module__)
-            
-            try:
-                result = func(*args, **kwargs)
-                execution_time = time.time() - start_time
-                log.info(f"✅ {func.__name__} 執行完成，耗時: {execution_time:.2f}s")
-                return result
-                
-            except Exception as e:
-                execution_time = time.time() - start_time
-                log.error(f"❌ {func.__name__} 執行失敗，耗時: {execution_time:.2f}s，錯誤: {e}")
-                raise
-                
-        return wrapper
-    return decorator
-
-# 異步版本的執行時間記錄裝飾器
-def log_async_execution_time(logger: logging.Logger = None):
-    """異步日誌裝飾器：記錄異步函數執行時間"""
-    import time
-    import asyncio
-    from functools import wraps
-    
-    def decorator(func):
-        @wraps(func)
+        # 使用 functools.wraps 來保留原始函式的元數據
+        @functools.wraps(func)
+        # 修正核心：在 wrapper 中同時使用 *args 和 **kwargs
         async def wrapper(*args, **kwargs):
+            # 如果沒有提供 task_name, 就使用函式自己的名字
+            effective_task_name = task_name if task_name else func.__name__
+            
+            logger = get_logger(func.__module__) # 自動獲取 logger
+            logger.info(f"🚀 開始執行異步任務: {effective_task_name}...")
+            
             start_time = time.time()
-            
-            # 使用提供的 logger 或建立新的
-            log = logger or setup_logger(func.__module__)
-            
             try:
+                # 修正核心：將 *args 和 **kwargs 原封不動地傳遞給原始函式
                 result = await func(*args, **kwargs)
-                execution_time = time.time() - start_time
-                log.info(f"✅ {func.__name__} 異步執行完成，耗時: {execution_time:.2f}s")
                 return result
-                
-            except Exception as e:
-                execution_time = time.time() - start_time
-                log.error(f"❌ {func.__name__} 異步執行失敗，耗時: {execution_time:.2f}s，錯誤: {e}")
-                raise
-                
+            finally:
+                end_time = time.time()
+                elapsed_time = end_time - start_time
+                logger.info(f"✅ 異步任務 '{effective_task_name}' 執行完成，耗時: {elapsed_time:.2f}s")
         return wrapper
     return decorator

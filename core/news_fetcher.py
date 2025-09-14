@@ -22,8 +22,9 @@ logger = logging.getLogger(__name__)
 class NewsFetcher:
     """異步新聞抓取器"""
     
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config, http_client):  # <--- 增加 http_client 參數
         self.config = config
+        self.http_client = http_client  # <--- 將 http_client 存起來
         self.http_config = config.get('http', {})
         
         # HTTP 設定
