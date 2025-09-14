@@ -34,7 +34,7 @@ from core.news_classifier import OptimizedNewsClassifier
 from core.news_processor import NewsProcessor
 from core.line_notifier import LineNotifier
 from core.sheet_manager import SheetManager
-from utils.logger import setup_logger
+from utils.logger import get_logger
 
 # ==============================================================================
 # 全域設定與初始化
@@ -44,7 +44,7 @@ from utils.logger import setup_logger
 load_dotenv()
 
 # 設定日誌
-logger = setup_logger(__name__)
+logger = get_logger(__name__) # 直接使用新的 get_logger 函式
 
 # 載入設定檔
 try:

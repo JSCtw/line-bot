@@ -2,46 +2,21 @@
 # -*- coding: utf-8 -*-
 """
 工具模組
+
+這個檔案作為 utils 套件的入口，定義了可以從外部直接導入的公共工具。
 """
 
-from .logger import setup_logger, get_module_logger, log_execution_time, log_async_execution_time
+# 修正：只導入 utils/logger.py 中實際存在的函式
+from .logger import get_logger, log_async_execution_time
+
+# http_client 的導入保持不變
 from .http_client import AsyncHTTPClient, HTTPClient
 
+# 修正：__all__ 列表只應包含上面導入的、希望公開的名稱
+# 這會影響 "from utils import *" 的行為
 __all__ = [
-    'setup_logger',
-    'get_module_logger',
-    'log_execution_time',
+    'get_logger',
     'log_async_execution_time',
     'AsyncHTTPClient',
     'HTTPClient',
 ]
-
-# ============================================================================
-
-# utils/__init__.py  
-# -*- coding: utf-8 -*-
-"""
-工具模組
-"""
-
-from .logger import setup_logger, get_module_logger, log_execution_time, log_async_execution_time
-from .http_client import AsyncHTTPClient, HTTPClient
-
-__all__ = [
-    'setup_logger',
-    'get_module_logger', 
-    'log_execution_time',
-    'log_async_execution_time',
-    'AsyncHTTPClient',
-    'HTTPClient',
-]
-
-# ============================================================================
-
-# tests/__init__.py
-# -*- coding: utf-8 -*-
-"""
-測試模組
-"""
-
-# 測試工具和設定可以在這裡匯入
