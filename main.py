@@ -310,18 +310,17 @@ def health_check():
 
 if __name__ == "__main__":
     logger.info("🔧 偵測到本地執行模式")
-    # 這裡的 news_bot 需要在本地執行時被初始化
+    
+    # ❗️ 為了確保 finally 區塊能存取到 news_bot 和 loop，先在外部宣告
+    news_bot = None
+    loop = None
     try:
         news_bot = NewsBot()
-        # 建立新的事件循環並執行
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
-        try:
-            results = loop.run_until_complete(news_bot.run_pipeline())
-            print(_format_response(results))
-        finally:
-            loop.close()
+        results = loop.run_until_complete(news_bot.run_pipeline())
+        print(_format_response(results))
             
     except KeyboardInterrupt:
         logger.info("👋 收到中斷信號，正在退出...")
@@ -329,3 +328,16 @@ if __name__ == "__main__":
         logger.error(f"💥 本地執行失敗: {e}")
         logger.error(traceback.format_exc())
         sys.exit(1)
+    finally:
+        # ❗️【核心修改】無論成功或失敗，最後都嘗試關閉資源
+        if news_bot and news_bot.http_client:
+            logger.info("🔌 正在關閉 HTTP 客戶端連線...")
+            # 確保 loop 存在才執行
+            if loop and loop.is_running() is False:
+                loop.run_until_complete(news_bot.http_client.close())
+                logger.info("✅ HTTP 客戶端已關閉")
+
+        if loop:
+            logger.info("➰ 關閉事件循環...")
+            loop.close()
+            logger.info("✅ 事件循環已關閉")
