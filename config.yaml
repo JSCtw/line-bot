@@ -16,19 +16,21 @@ news_sources:
     BBC: "https://feeds.bbci.co.uk/news/world/rss.xml"
     CNN: "http://rss.cnn.com/rss/edition_world.rss"
     Fox_News: "https://moxie.foxnews.com/google-publisher/world.xml"
-    Reuters: "http://feeds.reuters.com/reuters/worldnews"
+    Reuters: "https://feeds.reuters.com/reuters/worldnews"
+    Al_Jazeera: "https://www.aljazeera.com/xml/rss/all.xml"
   
   html_sources:
-    Al_Jazeera:
-      url: "https://www.aljazeera.com/news/"
+  #將半島電視台暫時註解
+    #Al_Jazeera:
+      #url: "https://www.aljazeera.com/news/"
       # ❗️【最終版選擇器】使用逗號分隔，匹配多種可能的容器
-      selector: "article.gc, div.card-live"
+      #selector: "article.gc, div.card-live"
       # ❗️【最終版選擇器】匹配多種可能的標題結構
-      title_selector: 'h3.gc__title, [data-testid="card-title"]'
+      #title_selector: 'h3.gc__title, [data-testid="card-title"]'
       # ❗️【最終版選擇器】匹配多種可能的連結結構
-      link_selector: "a.u-clickable-card__link, a"
-      content_selector: "div.wysiwyg--all-content"
-      max_articles: 15
+      #link_selector: "a.u-clickable-card__link, a"
+      #content_selector: "div.wysiwyg--all-content"
+      #max_articles: 15
 
 
 # AI 模型設定
