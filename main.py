@@ -1,343 +1,137 @@
+# main.py
 # -*- coding: utf-8 -*-
 """
 LINE Bot 新聞推播系統 - 優化版 v2.0
-主要改進：
-1. 模組化架構
-2. 指數退避重試機制
-3. 術語表整合
-4. 設定檔支援
-5. 異步優化與 timeout 預防
-6. 更完善的錯誤處理
 """
 
 import asyncio
-import logging
-import os
-import signal
 import sys
-import time
 import traceback
-from contextlib import asynccontextmanager
-from datetime import datetime, timezone, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
-import yaml
 from dotenv import load_dotenv
-from flask import Flask
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 # 匯入所有必要的模組
 from utils.config_manager import ConfigManager
 from utils.http_client import AsyncHTTPClient
-from core.news_fetcher import NewsFetcher
-from core.news_classifier import OptimizedNewsClassifier
-from core.news_processor import NewsProcessor
-from core.line_notifier import LineNotifier
-from core.sheet_manager import SheetManager
+from core import (
+    NewsFetcher,
+    NewsClassifier,
+    NewsProcessor,
+    LineNotifier,
+    SheetManager
+)
 from utils.logger import get_logger
 
-# ==============================================================================
-# 全域設定與初始化
-# ==============================================================================
-
-# 載入環境變數
-load_dotenv()
-
-# 設定日誌
-logger = get_logger(__name__) # 直接使用新的 get_logger 函式
-
-# 載入設定檔
-try:
-    config_manager = ConfigManager()
-    config = config_manager.get_config()
-    logger.info(f"設定檔載入成功 - {config['app']['name']} v{config['app']['version']}")
-except Exception as e:
-    logger.error(f"設定檔載入失敗: {e}")
-    sys.exit(1)
-
-# 驗證必要環境變數
-required_env_vars = [
-    "OPENROUTER_API_KEY",
-    "LINE_CHANNEL_ACCESS_TOKEN",
-    "USER_ID",
-    "GOOGLE_SHEET_URL"
-]
-
-missing_vars = [var for var in required_env_vars if not os.getenv(var)]
-if missing_vars and os.getenv("IS_CLOUD_RUN") != "true":
-    logger.error(f"缺少必要環境變數: {missing_vars}")
-    sys.exit(1)
+# ❗️【核心修正】將 logger 的初始化移回到全域範圍
+# 這樣 NewsBot 類別和 main() 函式都可以存取它
+logger = get_logger(__name__)
 
 # ==============================================================================
-# 主要業務邏輯類別
+# NewsBot 主類別
 # ==============================================================================
-
 class NewsBot:
     """新聞機器人主控制器 - 統籌所有組件"""
 
-    def __init__(self):
+    def __init__(self, config: Dict):
+        """初始化 NewsBot 的所有組件。"""
         self.config = config
-        self.execution_start_time = None
-        self.max_execution_time = config['cloud_run']['max_execution_time']
         self.http_client: Optional[AsyncHTTPClient] = None
         self.sheet_manager: Optional[SheetManager] = None
         self.news_fetcher: Optional[NewsFetcher] = None
-        self.news_classifier: Optional[OptimizedNewsClassifier] = None
+        self.news_classifier: Optional[NewsClassifier] = None
         self.news_processor: Optional[NewsProcessor] = None
         self.line_notifier: Optional[LineNotifier] = None
         
-        # 初始化各個組件
         self._initialize_components()
-
-        # 設定優雅關閉處理
-        self._setup_signal_handlers()
 
     def _initialize_components(self):
         """初始化所有系統組件"""
         try:
-            # 初始化 HTTP 客戶端 (新增)
             self.http_client = AsyncHTTPClient(self.config)
-
-            # 初始化 Google Sheets 管理器
             self.sheet_manager = SheetManager(self.config)
-
-            # 初始化新聞抓取器
             self.news_fetcher = NewsFetcher(self.config, self.http_client)
-
-            # 初始化新聞分類器 (傳入 http_client)
-            self.news_classifier = OptimizedNewsClassifier(self.config, self.http_client)
-
-            # 初始化新聞處理器 (傳入 http_client 和 sheet_manager)
+            self.news_classifier = NewsClassifier(self.config, self.http_client)
             self.news_processor = NewsProcessor(self.config, self.http_client, self.sheet_manager)
-            
-            # 初始化 LINE 通知器
             self.line_notifier = LineNotifier(self.config)
-            
-            # 建立完成
-            logger.info("所有系統組件初始化成功")
-
+            logger.info("所有系統組件初始化成功") # 現在可以正確存取 logger
         except Exception as e:
-            logger.error(f"系統組件初始化失敗: {e}", exc_info=True)
+            logger.error(f"系統組件初始化失敗: {e}", exc_info=True) # 現在可以正確存取 logger
             raise
 
-    def _setup_signal_handlers(self):
-        """設定信號處理器以優雅關閉"""
-        def signal_handler(signum, frame):
-            logger.warning(f"收到信號 {signum}，開始優雅關閉...")
-            self._graceful_shutdown()
-            sys.exit(0)
-        
-        signal.signal(signal.SIGTERM, signal_handler)
-        signal.signal(signal.SIGINT, signal_handler)
-
-    def _graceful_shutdown(self):
-        """優雅關閉處理"""
-        logger.info("正在進行優雅關閉...")
-        # 這裡可以加入清理資源的邏輯
-        
-    def _check_execution_time(self) -> bool:
-        """檢查是否接近執行時間上限"""
-        if not self.execution_start_time:
-            return True
-        
-        elapsed = time.time() - self.execution_start_time
-        remaining = self.max_execution_time - elapsed
-        
-        if remaining < 60:  # 少於1分鐘時警告
-            logger.warning(f"⏰ 執行時間即將到達上限，剩餘 {remaining:.1f} 秒")
-            return False
-        
-        return True
-
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=4, max=10),
-        retry=retry_if_exception_type((Exception,))
-    )
-    async def run_pipeline(self) -> Dict:
+    async def run_pipeline(self) -> None:
         """執行完整的新聞處理流水線"""
-        self.execution_start_time = time.time()
         logger.info("=" * 50)
-        logger.info("🚀 啟動新聞處理流水線 v2.0")
+        logger.info(f"🚀 啟動新聞處理流水線 v{self.config.get('app', {}).get('version', 'N/A')}")
         logger.info("=" * 50)
-        
-        results = {
-            'success': False,
-            'processed_count': 0,
-            'sent_count': 0,
-            'execution_time': 0,
-            'errors': []
-        }
         
         try:
-            # 步驟 1: 初始化 Google Sheets 連線與載入術語表
+            # 步驟 1: 初始化 G-Sheets 並載入資料
             logger.info("📊 初始化 Google Sheets 連線...")
-            if not self._check_execution_time():
-                raise TimeoutError("執行時間不足，提前終止")
-                
             await self.sheet_manager.initialize()
             glossary = await self.sheet_manager.load_glossary()
             logger.info(f"📚 載入術語表: {len(glossary)} 條術語")
-            
-            # 步驟 2: 獲取已發送新聞清單
             sent_links = await self.sheet_manager.get_sent_links()
             logger.info(f"📝 載入已發送記錄: {len(sent_links)} 條")
             
-            # 步驟 3: 抓取所有新聞來源
+            # 步驟 2: 抓取新聞
             logger.info("📰 開始抓取新聞來源...")
-            if not self._check_execution_time():
-                raise TimeoutError("執行時間不足，提前終止")
-                
             all_news = await self.news_fetcher.fetch_all_news()
-            logger.info(f"📊 共抓取 {len(all_news)} 則原始新聞")
             
-            # 步驟 4: 分類與過濾重要新聞
+            # 步驟 3: 分類與過濾
             logger.info("🎯 開始新聞分類與過濾...")
-            if not self._check_execution_time():
-                raise TimeoutError("執行時間不足，提前終止")
-                
-            important_news = await self.news_classifier.classify_and_filter(
-                all_news, sent_links
-            )
+            important_news = await self.news_classifier.classify_and_filter(all_news, sent_links)
             logger.info(f"✨ 過濾出 {len(important_news)} 則重要新聞")
             
-            # 步驟 5: 新聞處理與摘要生成
+            # 步驟 4: 摘要與處理
             logger.info("📝 開始新聞處理與摘要生成...")
-            if not self._check_execution_time():
-                raise TimeoutError("執行時間不足，提前終止")
-                
-            processed_news = await self.news_processor.process_news(
-                important_news, glossary
-            )
-            results['processed_count'] = len(processed_news)
+            processed_news = await self.news_processor.process_news(important_news, glossary)
             logger.info(f"🎉 生成 {len(processed_news)} 則處理後新聞")
             
             if not processed_news:
                 logger.info("ℹ️ 沒有需要推播的新聞")
-                results['success'] = True
-                return results
+                return
             
-            # 步驟 6: 發送到 LINE
+            # 步驟 5: 推播到 LINE
             logger.info("📱 開始發送 LINE 通知...")
-            if not self._check_execution_time():
-                raise TimeoutError("執行時間不足，提前終止")
-                
-            sent_count = await self.line_notifier.send_news_batch(processed_news)
-            results['sent_count'] = sent_count
+            await self.line_notifier.send_news_batch(processed_news)
             
-            # 步驟 7: 記錄到 Google Sheets
+            # 步驟 6: 記錄到 G-Sheets
             logger.info("💾 記錄發送結果到 Google Sheets...")
             await self.sheet_manager.log_sent_news(processed_news)
             
-            results['success'] = True
             logger.info("🎊 新聞流水線執行完成！")
             
-        except TimeoutError as e:
-            logger.error(f"⏰ 執行逾時: {e}")
-            results['errors'].append(f"Timeout: {str(e)}")
         except Exception as e:
-            logger.error(f"💥 流水線執行失敗: {e}")
-            logger.error(traceback.format_exc())
-            results['errors'].append(str(e))
-        finally:
-            results['execution_time'] = time.time() - self.execution_start_time
-            logger.info(f"⏱️ 總執行時間: {results['execution_time']:.2f} 秒")
-        
-        return results
+            logger.error(f"💥 流水線執行失敗: {e}", exc_info=True)
 
 # ==============================================================================
-# Flask 應用程式
+# 應用程式主入口
 # ==============================================================================
+async def main():
+    """應用程式主執行函式"""
+    load_dotenv(verbose=True) 
 
-app = Flask(__name__)
-# news_bot 實例應在處理請求時創建，以確保所有資源正確初始化
-# 這裡先不創建全域實例
+    config = ConfigManager().load_config()
 
-@asynccontextmanager
-async def lifespan(app):
-    """應用程式生命週期管理"""
-    global news_bot
-    news_bot = NewsBot()
-    yield
-    # 在應用程式關閉時清理資源
-    if news_bot.http_client:
-        await news_bot.http_client.close()
-
-# Flask 3.0 開始支援異步函數作為路由處理器
-@app.route("/", methods=["GET", "POST"])
-async def main_handler():
-    """主要的 HTTP 處理端點"""
-    try:
-        results = await news_bot.run_pipeline()
-        return _format_response(results), 200 if results['success'] else 500
-    except Exception as e:
-        error_msg = f"Critical error in main handler: {str(e)}\n{traceback.format_exc()[:4000]}"
-        logger.error(error_msg)
-        return error_msg, 500
-
-def _format_response(results: Dict) -> str:
-    """格式化回應訊息"""
-    status = "✅ SUCCESS" if results['success'] else "❌ FAILED"
-    
-    response = f"""
-{status} - News Pipeline Execution Report
-=====================================
-• Processed: {results['processed_count']} articles
-• Sent: {results['sent_count']} messages
-• Execution Time: {results['execution_time']:.2f}s
-• Max Time Limit: {news_bot.max_execution_time}s
-"""
-    
-    if results['errors']:
-        response += f"\n• Errors: {len(results['errors'])}\n"
-        for error in results['errors']:
-            response += f"  - {error}\n"
-    
-    return response.strip()
-
-@app.route("/health", methods=["GET"])
-def health_check():
-    """健康檢查端點"""
-    return {
-        'status': 'healthy',
-        'timestamp': datetime.now().isoformat(),
-        'version': config['app']['version']
-    }, 200
-
-# ==============================================================================
-# 本地執行入口
-# ==============================================================================
-
-if __name__ == "__main__":
     logger.info("🔧 偵測到本地執行模式")
+    logger.info(f"設定檔 {config['env']} 載入成功 - {config['app']['name']} v{config['app']['version']}")
     
-    # ❗️ 為了確保 finally 區塊能存取到 news_bot 和 loop，先在外部宣告
     news_bot = None
-    loop = None
     try:
-        news_bot = NewsBot()
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        results = loop.run_until_complete(news_bot.run_pipeline())
-        print(_format_response(results))
-            
-    except KeyboardInterrupt:
-        logger.info("👋 收到中斷信號，正在退出...")
-    except Exception as e:
-        logger.error(f"💥 本地執行失敗: {e}")
-        logger.error(traceback.format_exc())
-        sys.exit(1)
+        news_bot = NewsBot(config)
+        await news_bot.run_pipeline()
     finally:
-        # ❗️【核心修改】無論成功或失敗，最後都嘗試關閉資源
         if news_bot and news_bot.http_client:
             logger.info("🔌 正在關閉 HTTP 客戶端連線...")
-            # 確保 loop 存在才執行
-            if loop and loop.is_running() is False:
-                loop.run_until_complete(news_bot.http_client.close())
-                logger.info("✅ HTTP 客戶端已關閉")
+            await news_bot.http_client.close()
+            logger.info("✅ HTTP 客戶端已關閉")
 
-        if loop:
-            logger.info("➰ 關閉事件循環...")
-            loop.close()
-            logger.info("✅ 事件循環已關閉")
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("👋 收到中斷信號，程式正在退出...")
+    except Exception as e:
+        logger.error(f"💥 程式執行時發生未預期的嚴重錯誤: {e}", exc_info=True)
+        sys.exit(1)
