@@ -19,12 +19,16 @@ news_sources:
   
   html_sources:
     Al_Jazeera:
-      url: "https://www.aljazeera.com/news/"
-      selector: 'article.gc.u-clickable-card'
-      title_selector: 'h3.gc__title a span'
-      link_selector: 'h3.gc__title a'
-      content_selector: 'div.wysiwyg'
-      max_articles: 15
+        url: "https://www.aljazeera.com/news/"
+        # 修正 (1): 主選擇器，選取整個新聞卡片
+        selector: "article.gc"
+        # 修正 (2): 標題選擇器，從卡片內部尋找 h3 標籤
+        title_selector: "h3.gc__title"
+        # 修正 (3): 連結選擇器，從卡片內部尋找 h3 裡的 a 標籤
+        link_selector: "h3.gc__title a"
+        # 這個選擇器是用於文章內頁的，我們暫時不動它，通常是正確的
+        content_selector: "div.wysiwyg"
+        max_articles: 15
 
 # AI 模型設定
 ai_models:
