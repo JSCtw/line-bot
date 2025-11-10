@@ -1,7 +1,7 @@
 # main.py
 # -*- coding: utf-8 -*-
 """
-LINE Bot 新聞推播系統 - v3.0
+LINE Bot 新聞推播系統 - v3.01
 """
 
 # --- ❗️【新增的修復 1】---
@@ -31,7 +31,7 @@ from linebot.v3.messaging import (
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
-# 匯入所有核心組件 (現在可以正確找到了)
+# 匯入所有核心組件
 from utils.config_manager import ConfigManager
 from utils.http_client import AsyncHTTPClient
 from core import (
@@ -47,10 +47,10 @@ from utils.logger import get_logger
 # ❗️【新增】在所有操作前，首先從 .env 檔案載入環境變數
 load_dotenv(verbose=True)
 
-# 初始化日誌 (保持不變)
+# 初始化日誌
 logger = get_logger(__name__)
 
-# 載入設定檔 (保持不變)
+# 載入設定檔
 config = ConfigManager().load_config()
 
 # --- ❗️【新增】定義觸發詞 ---
@@ -97,7 +97,7 @@ def send_discord_alert(message: str, error: Exception = None):
 
 
 # ==============================================================================
-# NewsBot 主類別 (包含 run_pipeline 的修改)
+# NewsBot 主類別
 # ==============================================================================
 class NewsBot:
     """新聞機器人主控制器 - 統籌所有組件"""
