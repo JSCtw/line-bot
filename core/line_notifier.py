@@ -9,17 +9,25 @@ import os
 from typing import Dict, List, Any
 import asyncio # 為了 __del__ 中的 fallback
 
-# --- ❗️【這就是 v3.19.0 的正確導入結構】---
-# 
-# 針對 v3.19.0，所有元件 (基礎、訊息物件、Flex元件) 
-# 都從頂層的 'linebot.v3.messaging' 導入。
-# 
+# --- ❗️【修正 v3.19.0 的正確導入結構】---
+#
+# v3.19.0 的結構是分離的：
+# 1. 'linebot.v3.messaging' 負責 API 客戶端
+# 2. 'linebot.v3.messaging.models' 負責所有資料模型
+#
+
+# 1. 從 'linebot.v3.messaging' 導入 API 客戶端和配置
 from linebot.v3.messaging import (
     # 基礎設施
     AsyncApiClient,
     AsyncMessagingApi,
     Configuration,
-    ApiClient,
+    ApiClient
+)
+
+# 2. 從 'linebot.v3.messaging.models' 導入所有資料模型
+from linebot.v3.messaging.models import (
+    # 請求模型
     PushMessageRequest,
     ReplyMessageRequest,
     
@@ -35,7 +43,7 @@ from linebot.v3.messaging import (
     URIAction,
     CarouselContainer
 )
-# --- ❗️【修復完畢】---
+# --- ❗️【修正完畢】---
 
 from utils.logger import get_logger
 
