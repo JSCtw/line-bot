@@ -4,9 +4,16 @@
 LINE Bot 新聞推播系統 - v3.0
 """
 
-import asyncio
-import os
+# --- ❗️【新增的修復 1】---
+# 解決 ModuleNotFoundError
 import sys
+import os
+project_root = os.path.dirname(os.path.abspath(__file__))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+# --- ❗️【修復完畢】---
+
+import asyncio
 import traceback
 from typing import Dict, Optional
 
@@ -24,7 +31,7 @@ from linebot.v3.messaging import (
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
-# 匯入所有核心組件 (保持不變)
+# 匯入所有核心組件 (現在可以正確找到了)
 from utils.config_manager import ConfigManager
 from utils.http_client import AsyncHTTPClient
 from core import (
@@ -104,22 +111,21 @@ class NewsBot:
         self.news_classifier: Optional[NewsClassifier] = None
         self.news_processor: Optional[NewsProcessor] = None
         self.line_notifier: Optional[LineNotifier] = None
-        self._initialize_components()
+        # --- ❗️【修改】---
+        # 移除 self._initialize_components()
+        # 我們將在 Gunicorn worker 啟動後才呼叫它
+        # --- ❗️【修改完畢】---
 
     def _initialize_components(self):
         """初始化所有系統組件"""
-        # (此方法完全保持不變)
         try:
             self.http_client = AsyncHTTPClient(self.config)
             
-            # --- ❗️【重要修改】
+            # --- ❗️【修改】---
             # 確保 SheetManager 使用您修改後的版本 (從環境變數讀取)
-            # 這裡的 config 應已包含 worksheet_names
-            self.sheet_manager = SheetManager(
-                self.config.get('google_sheets', {}).get('worksheets', {}),
-                self.config.get('google_sheets', {}).get('credentials_path', 'service_account.json')
-            )
-            # --- 
+            # 傳遞完整的 config 物件
+            self.sheet_manager = SheetManager(self.config)
+            # --- ❗️【修改完畢】---
             
             self.news_fetcher = NewsFetcher(self.config, self.http_client)
             self.news_classifier = NewsClassifier(self.config, self.http_client)
@@ -141,17 +147,16 @@ class NewsBot:
         
         try:
             # (步驟 1 到 4 的核心邏輯完全保持不變)
-            # ❗️【重要修改】
-            # 根據您提供的 SheetManager.py， initialize() / load_glossary() / get_sent_links() 
-            # 都是同步函式，不應使用 await。
-            # 如果您後來把它們改成了非同步，請加回 await
+            # --- ❗️【修改】---
+            # 加回 await，因為 core/SheetManager.py 是非同步的
             logger.info("📊 初始化 Google Sheets 連線...")
-            # await self.sheet_manager.initialize() # 假設 initialize 是同步的
+            await self.sheet_manager.initialize() # 必須 await
             
-            glossary = self.sheet_manager.get_glossary() # 移除非同步 await
+            glossary = await self.sheet_manager.load_glossary() # 必須 await
             logger.info(f"📚 載入術語表: {len(glossary)} 條術語")
-            sent_links = self.sheet_manager.get_sent_links() # 移除非同步 await
+            sent_links = await self.sheet_manager.get_sent_links() # 必須 await
             logger.info(f"📝 載入已發送記錄: {len(sent_links)} 條")
+            # --- ❗️【修改完畢】---
             
             logger.info("📰 開始抓取新聞來源...")
             all_news = await self.news_fetcher.fetch_all_news()
@@ -175,7 +180,10 @@ class NewsBot:
             await self.line_notifier.send_news_batch(processed_news, target_id)
             
             logger.info("💾 記錄發送結果到 Google Sheets...")
-            self.sheet_manager.log_sent_links([news['link'] for news in processed_news]) # 移除非同步 await
+            # --- ❗️【修改】---
+            # log_sent_news 是非同步的，且應傳遞 processed_news 列表
+            await self.sheet_manager.log_sent_news(processed_news) # 必須 await
+            # --- ❗️【修改完畢】---
             
             logger.info(f"🎊 新聞流水線執行完成！已發送至 {target_id}")
             
@@ -202,10 +210,10 @@ app = Flask(__name__)
 
 # ❗️【新增】建立 NewsBot 的全域實例，供所有請求使用
 try:
-    news_bot = NewsBot(config)
+    # 這裡只實例化，但不初始化組件
+    news_bot = NewsBot(config) 
 except Exception as e:
     logger.critical(f"NewsBot 實例化失敗，無法啟動服務: {e}", exc_info=True)
-    # 在啟動時發送最後的警報
     send_discord_alert("NewsBot 實例化失敗，服務無法啟動", e)
     sys.exit(1) # 啟動失敗，退出
     
@@ -216,11 +224,34 @@ if not channel_secret:
     sys.exit(1)
 handler = WebhookHandler(channel_secret)
 
+# --- ❗️【新增的修復 2】---
+# Gunicorn worker 初始化
+_bot_initialized = False
+def initialize_bot_globally():
+    """在 Gunicorn worker 啟動後，初始化一次 Bot 組件"""
+    global _bot_initialized
+    if _bot_initialized:
+        return
+    
+    logger.info("Gunicorn worker 啟動，正在初始化 NewsBot 組件...")
+    try:
+        news_bot._initialize_components()
+        _bot_initialized = True
+        logger.info("NewsBot 組件初始化成功 (Worker)")
+    except Exception as e:
+        logger.critical(f"Gunicorn worker 初始化失敗: {e}", exc_info=True)
+        send_discord_alert("Gunicorn worker 初始化失敗，服務可能無法啟動", e)
+        # 讓 Gunicorn 重啟這個 worker
+        raise
+# --- ❗️【修復完畢】---
+
 
 # ❗️【新增】入口 A: LINE 使用者觸發
 @app.route("/callback", methods=['POST'])
 async def callback():
     """處理來自 LINE 的 Webhook 事件"""
+    initialize_bot_globally() # ❗️【新增】 確保 worker 已初始化
+    
     signature = request.headers.get('X-Line-Signature')
     body = request.get_data(as_text=True)
     
@@ -250,6 +281,7 @@ async def callback():
 @handler.add(MessageEvent, message=TextMessageContent)
 async def handle_message(event):
     """處理文字訊息事件"""
+    initialize_bot_globally() # ❗️【新增】 確保 worker 已初始化
     
     # --- ❗️【修改】---
     text = event.message.text.strip()
@@ -303,6 +335,8 @@ async def handle_message(event):
 @app.route("/trigger-push", methods=['POST'])
 async def trigger_push():
     """處理來自 n8n 的定時推播請求"""
+    initialize_bot_globally() # ❗️【新增】 確保 worker 已初始化
+    
     secret_key = os.getenv('TRIGGER_SECRET_KEY')
     auth_header = request.headers.get('Authorization')
     if not secret_key or auth_header != f"Bearer {secret_key}":
@@ -331,7 +365,9 @@ async def trigger_push():
 # ❗️【新增】健康檢查端點
 @app.route("/", methods=["GET"])
 def health_check():
-    return f"{config['app']['name']} v{config['app']['version']} is running.", 200
+    # ❗️【修改】讓健康檢查也觸發初始化 (如果尚未初始化的話)
+    initialize_bot_globally() 
+    return f"{config['app']['name']} v{config['app']['version']} is running. Bot initialized: {_bot_initialized}", 200
 
 # ==============================================================================
 # 本地開發伺服器啟動
@@ -341,5 +377,13 @@ if __name__ == "__main__":
     # 部署到 Zeabur 時，他們會使用 Gunicorn 等專業伺服器來啟動您的 app 物件
     port = int(os.getenv("PORT", 8080))
     logger.info(f"啟動 Flask 開發伺服器於 http://0.0.0.0:{port}")
+
+    # ❗️【新增】本地啟動時，也需要初始化
+    try:
+        initialize_bot_globally()
+    except Exception as e:
+        logger.critical(f"本地啟動時初始化失敗: {e}", exc_info=True)
+        sys.exit(1)
+
     # ❗️ 關閉 debug 模式，因為您已經有很好的日誌
     app.run(host='0.0.0.0', port=port, debug=False)
