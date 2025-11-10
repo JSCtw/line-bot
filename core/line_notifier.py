@@ -9,7 +9,7 @@ import os
 from typing import Dict, List, Any
 import asyncio # 為了 __del__ 中的 fallback
 
-# --- ❗️【這就是最終的、正確的導入結構】---
+# --- ❗️【這就是 v3.19.0 的正確導入結構】---
 # 
 # 針對 v3.19.0，所有元件 (基礎、訊息物件、Flex元件) 
 # 都從頂層的 'linebot.v3.messaging' 導入。
