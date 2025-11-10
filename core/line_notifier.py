@@ -7,27 +7,27 @@ LINE 通知器
 
 import os
 from typing import Dict, List, Any
+import asyncio # 為了 __del__ 中的 fallback
 
-# --- ❗️【這就是最終的修復】---
-#
-# 導入 SDK 基礎設施 (來自頂層)
+# --- ❗️【這就是最終的、正確的導入結構】---
+# 
+# 針對 v3.19.0，所有元件 (基礎、訊息物件、Flex元件) 
+# 都從頂層的 'linebot.v3.messaging' 導入。
+# 
 from linebot.v3.messaging import (
+    # 基礎設施
     AsyncApiClient,
     AsyncMessagingApi,
     Configuration,
     ApiClient,
     PushMessageRequest,
-    ReplyMessageRequest
-)
-
-# 導入 Message 物件 (來自 .models 子模組)
-from linebot.v3.messaging.models import (
+    ReplyMessageRequest,
+    
+    # 訊息物件 (Text, Flex)
     TextSendMessage,
-    FlexSendMessage
-)
-
-# 導入 Flex Message 元件 (來自頂層)
-from linebot.v3.messaging import (
+    FlexSendMessage,
+    
+    # Flex Message 元件 (Carousel, Bubble, etc.)
     BubbleContainer,
     BoxComponent,
     TextComponent,
