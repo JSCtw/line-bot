@@ -8,26 +8,25 @@ LINE 通知器
 import os
 from typing import Dict, List, Any
 
-# ❗️【新增】匯入 LINE Bot SDK 相關模組
+# --- ❗️【這就是最終的修復】---
+#
+# 導入 SDK 基礎設施 (來自頂層)
 from linebot.v3.messaging import (
     AsyncApiClient,
     AsyncMessagingApi,
     Configuration,
     ApiClient,
     PushMessageRequest,
-    ReplyMessageRequest,
+    ReplyMessageRequest
+)
+
+# 導入 Message 物件 (來自 .models 子模組)
+from linebot.v3.messaging.models import (
     TextSendMessage,
     FlexSendMessage
 )
 
-# --- ❗️【這就是最終的修復】---
-# 
-# 錯誤的路徑 (v3.19.0)： linebot.v3.messaging.models
-# 正確的路徑 (v3.19.0)： linebot.v3.messaging
-#
-# 我們將 'CarouselContainer' 等 Flex Message 元件的 import 
-# 從錯誤的 '.models' 子模組移到正確的 'messaging' 根模組
-#
+# 導入 Flex Message 元件 (來自頂層)
 from linebot.v3.messaging import (
     BubbleContainer,
     BoxComponent,
