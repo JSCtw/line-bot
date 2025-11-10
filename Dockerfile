@@ -1,3 +1,4 @@
+#DOCKERFILES  (對應 v3.2)
 FROM python:3.11-slim
 
 WORKDIR /app
