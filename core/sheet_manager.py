@@ -1,3 +1,4 @@
+#core/SheetManager.py
 # -*- coding: utf-8 -*-
 """
 Google Sheets 管理器
@@ -7,6 +8,7 @@ Google Sheets 管理器
 import asyncio
 import logging
 import os
+import json  # ❗️【新增】匯入 json 模組
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Set, Optional, Any
 from concurrent.futures import ThreadPoolExecutor
@@ -21,6 +23,7 @@ logger = logging.getLogger(__name__)
 class SheetManager:
     """Google Sheets 管理器"""
     
+    # 保持 __init__ 不變
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.sheets_config = config.get('google_sheets', {})
@@ -39,6 +42,7 @@ class SheetManager:
         # 線程池 (用於同步轉異步)
         self.executor = ThreadPoolExecutor(max_workers=3)
     
+    # 保持 initialize 不變
     async def initialize(self) -> None:
         """初始化 Google Sheets 連線"""
         logger.info("🔗 初始化 Google Sheets 連線...")
@@ -50,26 +54,59 @@ class SheetManager:
         
         logger.info("✅ Google Sheets 初始化完成")
     
+    # ❗️【修改】替換 _sync_initialize 的內部邏輯
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=4, max=10),
-        retry=retry_if_exception_type((DefaultCredentialsError, gspread.exceptions.APIError))
+        retry=retry_if_exception_type((DefaultCredentialsError, gspread.exceptions.APIError, FileNotFoundError))
     )
     def _sync_initialize(self) -> None:
-        """同步的初始化邏輯"""
+        """
+        同步的初始化邏輯。
+        優先從 'GOOGLE_CREDENTIALS_JSON' 環境變數讀取憑證 (用於 Zeabur)。
+        若失敗，則回退到本地 'gcp_credentials.json' 檔案 (用於本地開發)。
+        """
         try:
-            # 讀取位於專案根目錄的憑證檔案
-            creds_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'gcp_credentials.json')
+            creds: Optional[Credentials] = None
+            scopes = ['https://www.googleapis.com/auth/spreadsheets']
             
-            # 使用 Credentials 類別直接載入，任何錯誤都會被外部捕捉
-            creds = Credentials.from_service_account_file(
-                creds_path,
-                scopes=['https://www.googleapis.com/auth/spreadsheets']
-            )
+            # 1. 嘗試從環境變數讀取 (Zeabur / 生產環境)
+            creds_json_str = os.getenv('GOOGLE_CREDENTIALS_JSON')
             
+            if creds_json_str:
+                logger.info("偵測到 'GOOGLE_CREDENTIALS_JSON' 環境變數，將使用此憑證。")
+                try:
+                    creds_dict = json.loads(creds_json_str)
+                    creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+                except json.JSONDecodeError:
+                    logger.error("無法解析 GOOGLE_CREDENTIALS_JSON，請檢查環境變數的 JSON 格式。")
+                    raise  # 格式錯誤，重試也無用，直接拋出
+                except Exception as e:
+                    logger.error(f"從環境變數載入憑證失敗: {e}")
+                    raise # 拋出以觸發 tenacity 重試
+            
+            else:
+                # 2. 回退到本地檔案 (本地開發)
+                logger.info("未偵測到 'GOOGLE_CREDENTIALS_JSON'，將回退使用本地憑證檔案 'gcp_credentials.json'。")
+                
+                # 使用您原本的路徑邏輯
+                creds_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'gcp_credentials.json')
+                
+                if not os.path.exists(creds_path):
+                    logger.error(f"本地憑證檔案 'gcp_credentials.json' 不存在於: {creds_path}")
+                    raise FileNotFoundError(f"本地憑證檔案不存在: {creds_path}")
+                
+                creds = Credentials.from_service_account_file(creds_path, scopes=scopes)
+
+            # 3. 檢查憑證是否成功載入
+            if not creds:
+                # 理論上，如果 creds_json_str 和本地檔案都不存在，會在上面拋出錯誤
+                raise ValueError("無法獲取 Google 憑證 (環境變數和本地檔案均失敗)。")
+
+            # 4. 授權 gspread client (保持不變)
             self.client = gspread.authorize(creds)
             
-            # 開啟試算表
+            # 5. 開啟試算表 (保持不變)
             sheet_url = os.getenv("GOOGLE_SHEET_URL")
             if not sheet_url:
                 raise ValueError("GOOGLE_SHEET_URL 環境變數未設定")
@@ -77,13 +114,15 @@ class SheetManager:
             self.spreadsheet = self.client.open_by_url(sheet_url)
             logger.info(f"📊 成功開啟試算表: {self.spreadsheet.title}")
             
-            # 初始化工作表
+            # 6. 初始化工作表 (保持不變)
             self._initialize_worksheets()
             
         except Exception as e:
             logger.error(f"Google Sheets 初始化失敗: {e}")
-            raise
+            raise  # 重新拋出錯誤，以便 tenacity 捕捉
     
+    # --- 以下所有方法保持不變 ---
+
     def _initialize_worksheets(self) -> None:
         """初始化所需的工作表"""
         worksheet_names = self.sheets_config.get('worksheets', {})
