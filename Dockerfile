@@ -1,4 +1,4 @@
-# === Cloud Run 標準 Dockerfile (v4.1 - CMD 修復) ===
+# === Cloud Run 標準 Dockerfile (v4.2 - RUN 快取清除) ===
 FROM python:3.11-slim
 WORKDIR /app
 
