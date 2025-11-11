@@ -1,4 +1,4 @@
-# core/line_notifier.py (v3.31修正)
+# core/line_notifier.py (v3.32修正)
 # -*- coding: utf-8 -*-
 """
 LINE 通知器
@@ -22,28 +22,25 @@ from linebot.v3.messaging import (
     Configuration,
     ApiClient,
 
-    # --- [v3.3修正] ---
-    # 訊息物件 (Text, Flex) 應從這裡導入
+    # 訊息物件 (Text, Flex) 從這裡導入
     TextMessage,
-    FlexMessage,
+    FlexMessage
     
-    # [3.31修正] Flex Message 元件 (Carousel, Bubble, etc.) 改從這裡導入
-    BubbleContainer,
-    BoxComponent,
-    TextComponent,
-    ButtonComponent,
-    URIAction,
-    CarouselContainer
 )
 
 # 2. 從 'linebot.v3.messaging.models' 導入所有資料模型
 from linebot.v3.messaging.models import (
     # 請求模型
     PushMessageRequest,
-    ReplyMessageRequest
+    ReplyMessageRequest,
     
-    # --- [v3.3修正] ---
-    # 訊息物件 TextSendMessage, FlexSendMessage) 已從此處移除 
+    # [3.32修正] Flex Message 元件 (Carousel, Bubble, etc.) 改從這裡導入
+    BubbleContainer,
+    BoxComponent,
+    TextComponent,
+    ButtonComponent,
+    URIAction,
+    CarouselContainer
     
 )
 
