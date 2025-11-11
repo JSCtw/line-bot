@@ -1,4 +1,4 @@
-# core/news_processor.py
+# core/news_processor.py (v3.3修正)
 # -*- coding: utf-8 -*-
 """
 新聞處理器
@@ -11,7 +11,7 @@ import random
 import re
 from typing import Dict, List, Any, Optional
 from difflib import SequenceMatcher
-
+from concurrent.futures import ThreadPoolExecutor # [v3.3 修正] 導入 ThreadPoolExecutor
 from utils.http_client import AsyncHTTPClient
 from utils.logger import get_logger, log_async_execution_time
 
@@ -35,6 +35,8 @@ class NewsProcessor:
         self.max_news_per_source = self.processing_config.get('max_news_per_source_in_final', 2)
         self.similarity_threshold = self.processing_config.get('similarity_threshold', 0.7)
         
+        # [v3.3 修正] 為 CPU 密集型任務 (分組) 建立線程池
+        self.executor = ThreadPoolExecutor(max_workers=5)
     @log_async_execution_time("process_all_news")
     async def process_news(self, news_list: List[Dict], glossary: Dict[str, str]) -> List[Dict]:
         """
@@ -46,19 +48,24 @@ class NewsProcessor:
         
         logger.info(f"🔄 開始處理 {len(news_list)} 則新聞...")
         
-        grouped_news = self._group_similar_news(news_list)
+        # [v3.3 修正] 將 CPU 密集型的 _group_similar_news 放入線程池中執行，以避免阻塞 asyncio 事件迴圈
+        loop = asyncio.get_running_loop()
+        grouped_news = await loop.run_in_executor(
+            self.executor, self._group_similar_news, news_list
+        )
         logger.info(f"📊 新聞分為 {len(grouped_news)} 組")
         
+        # 排序和選擇是快速的記憶體操作，不需要放入 executor
         sorted_groups = self._sort_groups_by_importance(grouped_news)
         
         selected_groups = self._select_groups_for_processing(sorted_groups)
         logger.info(f"🎯 選擇 {len(selected_groups)} 組新聞進行摘要")
         
-        # ❗️【核心修改】使用 asyncio.gather 執行所有任務
+        # 使用 asyncio.gather 執行所有任務
         tasks = [self._generate_single_summary(group, glossary) for group in selected_groups]
         processed_results = await asyncio.gather(*tasks)
 
-        # ❗️【核心修改】只保留那些沒有回傳 None 的成功結果
+        # 只保留那些沒有回傳 None 的成功結果
         final_news = [news for news in processed_results if news is not None]
         
         logger.info(f"✅ 新聞處理完成，產生 {len(final_news)} 則最終新聞")
@@ -134,7 +141,7 @@ class NewsProcessor:
             return processed_result
             
         except Exception as e:
-            # ❗️【核心修改】摘要失敗時，記錄詳細錯誤並回傳 None
+            # 摘要失敗時，記錄詳細錯誤並回傳 None
             logger.error(f"❌ 為「{primary_title}」生成摘要時發生錯誤，已放棄此新聞組。錯誤: {e}", exc_info=True)
             return None
     

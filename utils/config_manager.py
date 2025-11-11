@@ -1,4 +1,4 @@
-# utils/config_manager.py (0915優化版本)
+# utils/config_manager.py (v3.3)
 # -*- coding: utf-8 -*-
 """
 設定檔管理器
@@ -9,6 +9,10 @@ import os
 import yaml
 from typing import Dict, Any, Optional
 from pathlib import Path
+import logging # [v3.3修正] 導入 logging
+
+# [v3.3修正] 獲取 logger 實例
+logger = logging.getLogger(__name__)
 
 class ConfigManager:
     """設定檔管理器 - 使用單例模式確保全局唯一實例"""
@@ -37,7 +41,8 @@ class ConfigManager:
         if not cfg_path.exists():
             raise FileNotFoundError(f"設定檔不存在: {cfg_path}")
 
-        print(f"正在從 {cfg_path.resolve()} 載入設定檔...") # 增加一個 print 方便除錯
+        # [v3.3修正]使用 logger 而不是 print
+        logger.info(f"正在從 {cfg_path.resolve()} 載入設定檔...")
 
         with open(cfg_path, 'r', encoding='utf-8') as f:
             self._config = yaml.safe_load(f)
@@ -56,22 +61,23 @@ class ConfigManager:
         return self._config.copy()
 
     def _find_config_file(self) -> Path:
-        """從專案根目錄向上尋找 config.yaml"""
-        # 從目前工作目錄開始尋找
-        current_dir = Path.cwd()
-        for _ in range(5): # 最多向上尋找 5 層
-            config_file = current_dir / "config.yaml"
-            if config_file.exists():
-                return config_file
-            if current_dir.parent == current_dir: # 到達根目錄
-                break
-            current_dir = current_dir.parent
+        """
+        ❗️ [Gemini 修正 3/3]
+        使用 __file__ 來定位 config.yaml，這比 cwd() 健壯 100 倍。
+        """
+        # __file__ 是 /app/utils/config_manager.py
+        # .parent 是 /app/utils
+        # .parent.parent 是 /app (專案根目錄)
+        project_root = Path(__file__).resolve().parent.parent
+        config_file = project_root / "config.yaml"
+        
+        if config_file.exists():
+            return config_file
             
-        raise FileNotFoundError("在專案目錄中找不到 config.yaml")
+        raise FileNotFoundError(f"在專案根目錄中找不到 config.yaml (路徑: {config_file})")
     
     def _apply_env_overrides(self) -> None:
         """應用環境變數覆蓋設定"""
-        # (這部分邏輯與您原本的完全相同，無需修改)
         if self._config is None:
             return
 
@@ -113,8 +119,3 @@ class ConfigManager:
             return current
         except (KeyError, TypeError):
             return default
-
-# 您其他的 get_* 方法可以保留，它們基於 get() 方法，是很好的快捷方式
-# 例如:
-# def get_rss_feeds(self) -> Dict[str, str]:
-#     return self.get('news_sources', 'rss_feeds', default={})

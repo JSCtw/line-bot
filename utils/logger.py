@@ -1,21 +1,20 @@
-# utils/logger.py 
+# utils/logger.py (v3.3)
 
 import logging
 import time
 import functools
 
-# 假設您的 logger 設定也在這個檔案中
-# 如果不在，請確保 logging 被正確匯入
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s | %(name)s | %(levelname)s | %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S',
-)
+# [v3.3 修正]
+# 移除了所有 logging.basicConfig()。
+# 在 Cloud Run/Gunicorn 環境中，日誌設定應由 Gunicorn (入口) 
+# 自動處理 (預設輸出到 stdout/stderr)。
+# 在模組中手動設定會導致衝突或日誌重複。
 
 def get_logger(name):
+    """獲取一個 logger 實例"""
     return logging.getLogger(name)
 
-# --- 這是需要修正的裝飾器 ---
+# --- 裝飾器 (此部分是 100% 正確且健壯的) ---
 def log_async_execution_time(task_name: str = ""):
     """
     一個功能更強大的異步函式執行時間紀錄裝飾器。
@@ -29,12 +28,13 @@ def log_async_execution_time(task_name: str = ""):
             # 如果沒有提供 task_name, 就使用函式自己的名字
             effective_task_name = task_name if task_name else func.__name__
             
-            logger = get_logger(func.__module__) # 自動獲取 logger
+            # 自動獲取 logger (這非常棒)
+            logger = get_logger(func.__module__)
             logger.info(f"🚀 開始執行異步任務: {effective_task_name}...")
             
             start_time = time.time()
             try:
-                # 修正核心：將 *args 和 **kwargs 原封不動地傳遞給原始函式
+                # 將 *args 和 **kwargs 原封不動地傳遞给原始函式
                 result = await func(*args, **kwargs)
                 return result
             finally:

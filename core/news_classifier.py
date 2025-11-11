@@ -1,3 +1,4 @@
+# core/news_classifier.py (v3.3 修正)
 # -*- coding: utf-8 -*-
 """
 優化的新聞分類器
@@ -10,16 +11,21 @@ import re
 import time
 from typing import List, Dict, Any, Set
 
+# 移除了 'difflib' 和 'ThreadPoolExecutor'，它們不屬於此檔案
 from utils.http_client import AsyncHTTPClient
-# 假設您修正後的裝飾器位於 utils.logger
 from utils.logger import log_async_execution_time, get_logger
 
-# 使用 get_logger 獲取 logger 實例，而不是 logging.getLogger(__name__)
-# 這樣可以與我們的 logger 設定保持一致
+# 使用 get_logger 獲取與我們設定一致的 logger
 logger = get_logger(__name__)
 
 class OptimizedNewsClassifier:
     """優化的異步新聞分類器"""
+    
+    # [v3.3 優化] 將 Regex 編譯為類別常數，避免在每次解析時重複編譯
+    BATCH_PARSE_PATTERN = re.compile(
+        r"Article\s+(\d+):\s*Topic:\s*(.*?)\s*\|\s*Scope:\s*(.*?)(?:\n|$)", 
+        re.IGNORECASE
+    )
     
     def __init__(self, config: Dict[str, Any], http_client: AsyncHTTPClient):
         self.config = config
@@ -28,7 +34,7 @@ class OptimizedNewsClassifier:
         # 讀取分類模型的設定
         self.ai_config = self.config.get("ai_models", {}).get("classification", {})
         
-        # 分類器參數
+        # 分類器處理參數
         self.classifier_config = config.get('classifier', {})
         self.max_concurrent = self.classifier_config.get('max_concurrent', 5)
         self.batch_size = self.classifier_config.get('batch_size', 8)
@@ -36,18 +42,12 @@ class OptimizedNewsClassifier:
         # 分類關鍵詞
         self.scope_keywords = self.classifier_config.get('scope_keywords', {})
         
-    # 使用修正後的裝飾器，並傳入一個清晰的任務名稱
+        # (移除了不必要的 self.executor)
+        
     @log_async_execution_time("classify_and_filter_news")
     async def classify_and_filter(self, news_list: List[Dict], sent_links: Set[str]) -> List[Dict]:
         """
         分類並過濾新聞
-        
-        Args:
-            news_list: 原始新聞列表
-            sent_links: 已發送新聞連結集合
-            
-        Returns:
-            過濾後的重要新聞列表
         """
         # 過濾未發送的新聞
         unsent_news = [
@@ -75,7 +75,6 @@ class OptimizedNewsClassifier:
         """批次分類新聞"""
         logger.info(f"📦 開始批次分類，共 {len(news_list)} 則新聞")
         
-        # 分割成批次
         batches = [
             news_list[i:i + self.batch_size] 
             for i in range(0, len(news_list), self.batch_size)
@@ -83,29 +82,24 @@ class OptimizedNewsClassifier:
         
         logger.info(f"🔄 分為 {len(batches)} 批，每批最多 {self.batch_size} 則")
         
-        # 使用 Semaphore 控制並發數量
         semaphore = asyncio.Semaphore(self.max_concurrent)
         
         async def run_with_semaphore(task):
             async with semaphore:
                 return await task
 
-        # 創建任務
         tasks = [
             run_with_semaphore(self._classify_single_batch(i, batch)) 
             for i, batch in enumerate(batches)
         ]
         
-        # 使用 asyncio.gather 執行所有任務
         batch_results_list = await asyncio.gather(*tasks, return_exceptions=True)
         
         all_results = []
-        # 處理結果
         for i, result in enumerate(batch_results_list):
             if isinstance(result, Exception):
                 logger.error(f"❌ 第 {i+1} 批分類時發生無法恢復的錯誤: {result}")
                 failed_batch = batches[i]
-                # 為失敗的批次中的每條新聞賦予默認值
                 default_results = [
                     {"news": news, "topic": "未知", "scope_raw": "分類失敗"} 
                     for news in failed_batch
@@ -121,26 +115,20 @@ class OptimizedNewsClassifier:
         logger.info(f"🔄 處理第 {batch_index + 1} 批，共 {len(batch)} 則新聞")
         
         try:
-            # 建立分類提示
             prompt = self._create_batch_classification_prompt(batch)
             
-            # 呼叫 http_client 的 call_ai_api，將所有 AI 參數傳入
-            # `self.ai_config` 包含了 model, temperature, max_tokens 等參數
             response_text = await self.http_client.call_ai_api(
                 prompt=prompt,
                 **self.ai_config
             )
             
-            # 解析回應
             parsed_results = self._parse_batch_response(response_text, batch)
             
             logger.info(f"✅ 第 {batch_index + 1} 批分類完成")
             return parsed_results
             
         except Exception as e:
-            # 錯誤會被 asyncio.gather 捕獲，這裡只做記錄
             logger.error(f"❌ 在處理第 {batch_index + 1} 批時捕獲到異常: {e}", exc_info=True)
-            # 向上拋出異常，讓 _classify_news_batch 能夠處理
             raise
 
     def _create_batch_classification_prompt(self, news_batch: List[Dict]) -> str:
@@ -194,11 +182,11 @@ Article 2: Topic: 軍事 & 安全 | Scope: 區域性
         """解析 AI 批次分類回應"""
         results = []
         
-        pattern = re.compile(r"Article\s+(\d+):\s*Topic:\s*(.*?)\s*\|\s*Scope:\s*(.*?)(?:\n|$)", re.IGNORECASE)
+        # [v3.3 優化] 使用預先編譯的類別常數
         
         parsed_indices = set()
         
-        for match in pattern.finditer(response_text):
+        for match in self.BATCH_PARSE_PATTERN.finditer(response_text):
             try:
                 article_index = int(match.group(1)) - 1
                 topic = match.group(2).strip()
@@ -247,7 +235,7 @@ Article 2: Topic: 軍事 & 安全 | Scope: 區域性
             if "分類失敗" in scope_original:
                 scope = "分類失敗"
             elif "未解析" in scope_original:
-                 scope = "未解析"
+                scope = "未解析"
             elif any(keyword.lower() in scope_raw for keyword in global_keywords):
                 scope = "全球性"
             elif any(keyword.lower() in scope_raw for keyword in regional_keywords):
@@ -266,5 +254,3 @@ Article 2: Topic: 軍事 & 安全 | Scope: 區域性
         logger.info(f"📊 分類統計: {scope_counts}")
         
         return filtered_news
-
-   

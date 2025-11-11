@@ -1,8 +1,10 @@
+#http_client.py (v3,3)
 # -*- coding: utf-8 -*-
 """
 HTTP 客戶端工具
 提供統一的 HTTP 客戶端介面，支援同步和異步操作，具備重試和錯誤處理機制
 """
+
 
 import asyncio
 import logging
@@ -149,6 +151,32 @@ class AsyncHTTPClient:
         wait=wait_exponential(multiplier=2, min=4, max=30),
         retry=retry_if_exception_type((aiohttp.ClientError, asyncio.TimeoutError))
     )
+    async def post_json(self, url: str, json_payload: Dict, headers: Optional[Dict] = None, **kwargs) -> Dict:
+        """
+        (Gemini 新增) 異步發送 POST JSON 請求並獲取 JSON 回應
+        """
+        try:
+            session = await self._get_session()
+            
+            # 準備 headers
+            merged_headers = self.default_headers.copy()
+            if headers:
+                merged_headers.update(headers)
+            # 確保 Content-Type (如果未提供)
+            if 'Content-Type' not in merged_headers:
+                merged_headers['Content-Type'] = 'application/json'
+            
+            async with session.post(url, json=json_payload, headers=merged_headers, **kwargs) as response:
+                response.raise_for_status()
+                # 嘗試解析 JSON 回應，如果 API 沒有回傳 body 則回傳空
+                if response.status != 204: # 204 No Content
+                    return await response.json()
+                return {"status": "success", "code": 204}
+                
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            logger.warning(f"⚠️ Async POST JSON 失敗: {url} - {e}")
+            raise
+
     async def call_ai_api(self, prompt: str, **kwargs) -> str:
         """異步呼叫 AI API，接受動態參數"""
         session = await self._get_session()

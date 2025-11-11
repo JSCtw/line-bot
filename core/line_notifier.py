@@ -1,4 +1,4 @@
-# core/line_notifier.py
+# core/line_notifier.py (對應v3.3)
 # -*- coding: utf-8 -*-
 """
 LINE 通知器
@@ -9,12 +9,10 @@ import os
 from typing import Dict, List, Any
 import asyncio # 為了 __del__ 中的 fallback
 
-# --- ❗️【修正 v3.19.0 的正確導入結構】---
-#
-# v3.19.0 的結構是分離的：
+# --- 【導入結構】---
 # 1. 'linebot.v3.messaging' 負責 API 客戶端
 # 2. 'linebot.v3.messaging.models' 負責所有資料模型
-#
+
 
 # 1. 從 'linebot.v3.messaging' 導入 API 客戶端和配置
 from linebot.v3.messaging import (
@@ -22,7 +20,13 @@ from linebot.v3.messaging import (
     AsyncApiClient,
     AsyncMessagingApi,
     Configuration,
-    ApiClient
+    ApiClient,
+
+    # --- [v3.3修正-1] ---
+    # 訊息物件 (Text, Flex) 應從這裡導入
+    TextMessage,
+    FlexMessage
+    # --- [修正完畢] ---
 )
 
 # 2. 從 'linebot.v3.messaging.models' 導入所有資料模型
@@ -31,9 +35,11 @@ from linebot.v3.messaging.models import (
     PushMessageRequest,
     ReplyMessageRequest,
     
-    # 訊息物件 (Text, Flex)
-    TextSendMessage,
-    FlexSendMessage,
+    # --- [v3.3修正-2] ---
+    # 訊息物件 (Text, Flex) 已從此處移除
+    # 錯誤的 (v1/v2) 名稱：TextSendMessage,
+    # 錯誤的 (v1/v2) 名稱：FlexSendMessage,
+    # # --- [修正完畢] --
     
     # Flex Message 元件 (Carousel, Bubble, etc.)
     BubbleContainer,
@@ -43,7 +49,6 @@ from linebot.v3.messaging.models import (
     URIAction,
     CarouselContainer
 )
-# --- ❗️【修正完畢】---
 
 from utils.logger import get_logger
 
@@ -55,7 +60,7 @@ class LineNotifier:
     def __init__(self, config: Dict[str, Any]):
         self.config = config.get('line_bot', {})
         
-        # ❗️ 從環境變數讀取 LINE Bot 憑證
+        # 從環境變數讀取 LINE Bot 憑證
         access_token = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
         if not access_token:
             logger.error("環境變數 LINE_CHANNEL_ACCESS_TOKEN 未設定")
@@ -63,7 +68,7 @@ class LineNotifier:
 
         self.configuration = Configuration(access_token=access_token)
         
-        # ❗️【修改】使用 AsyncMessagingApi 來進行非同步發送
+        # 使用 AsyncMessagingApi 來進行非同步發送
         self.async_api_client = AsyncApiClient(self.configuration)
         self.line_bot_api = AsyncMessagingApi(self.async_api_client)
 
@@ -75,7 +80,7 @@ class LineNotifier:
         try:
             reply_request = ReplyMessageRequest(
                 reply_token=reply_token,
-                messages=[TextSendMessage(text=text)]
+                messages=[TextMessage(text=text)] # [v3.3修正-3] 使用 v3 正確的類別名稱 TextMessage
             )
             await self.line_bot_api.reply_message(reply_request)
             logger.info(f"已回覆訊息至 token: {reply_token[:10]}...")
@@ -90,7 +95,7 @@ class LineNotifier:
         try:
             push_request = PushMessageRequest(
                 to=target_id,
-                messages=[TextSendMessage(text=text)]
+                messages=[TextMessage(text=text)] # [v3.3修正-4] 使用 v3 正確的類別名稱 TextMessage
             )
             await self.line_bot_api.push_message(push_request)
             logger.info(f"已推播文字訊息至: {target_id}")
@@ -102,7 +107,7 @@ class LineNotifier:
         (付費) 主動推播 Flex Message
         """
         try:
-            message = FlexSendMessage(
+            message = FlexMessage(     # [v3.3修正-5] 使用 v3 正確的類別名稱 FlexMessage
                 alt_text=alt_text,
                 contents=container
             )
@@ -177,7 +182,7 @@ class LineNotifier:
         bubbles = [self._create_news_bubble(item) for item in news_items]
         
         # 建立輪播容器
-        # ❗️ LINE 限制輪播一次最多 12 則
+        # LINE 限制輪播一次最多 12 則
         carousel_container = CarouselContainer(contents=bubbles[:12])
         
         await self.send_flex_message(

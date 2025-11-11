@@ -1,4 +1,4 @@
-#core/SheetManager.py
+#core/SheetManager.py (v3.3 for GCP)
 # -*- coding: utf-8 -*-
 """
 Google Sheets 管理器
@@ -8,12 +8,13 @@ Google Sheets 管理器
 import asyncio
 import logging
 import os
-import json  # ❗️【新增】匯入 json 模組
+import json  # 匯入 json 模組
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Set, Optional, Any
 from concurrent.futures import ThreadPoolExecutor
 
 import gspread
+import google.auth  # [v3.3 修正] 導入 google.auth
 from google.oauth2.service_account import Credentials
 from google.auth.exceptions import DefaultCredentialsError
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
@@ -54,7 +55,7 @@ class SheetManager:
         
         logger.info("✅ Google Sheets 初始化完成")
     
-    # ❗️【修改】替換 _sync_initialize 的內部邏輯
+    # [v3.3修正] 替換 _sync_initialize 的內部邏輯
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=4, max=10),
@@ -70,59 +71,68 @@ class SheetManager:
             creds: Optional[Credentials] = None
             scopes = ['https://www.googleapis.com/auth/spreadsheets']
             
-            # 1. 嘗試從環境變數讀取 (Zeabur / 生產環境)
-            creds_json_str = os.getenv('GOOGLE_CREDENTIALS_JSON')
-            
-            if creds_json_str:
-                logger.info("偵測到 'GOOGLE_CREDENTIALS_JSON' 環境變數，將使用此憑證。")
-                try:
-                    creds_dict = json.loads(creds_json_str)
-                    creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-                except json.JSONDecodeError:
-                    logger.error("無法解析 GOOGLE_CREDENTIALS_JSON，請檢查環境變數的 JSON 格式。")
-                    raise  # 格式錯誤，重試也無用，直接拋出
-                except Exception as e:
-                    logger.error(f"從環境變數載入憑證失敗: {e}")
-                    raise # 拋出以觸發 tenacity 重試
-            
-            else:
-                # 2. 回退到本地檔案 (本地開發)
-                logger.info("未偵測到 'GOOGLE_CREDENTIALS_JSON'，將回退使用本地憑證檔案 'gcp_credentials.json'。")
-                
-                # 使用您原本的路徑邏輯
-                creds_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'gcp_credentials.json')
-                
-                if not os.path.exists(creds_path):
-                    logger.error(f"本地憑證檔案 'gcp_credentials.json' 不存在於: {creds_path}")
-                    raise FileNotFoundError(f"本地憑證檔案不存在: {creds_path}")
-                
-                creds = Credentials.from_service_account_file(creds_path, scopes=scopes)
+            # --- 階段 1: 嘗試 GCP 應用程式預設憑證 (ADC) ---
+            # 這是在 Cloud Run 上運行的標準方式
+                        
+            try:
+                creds, _ = google.auth.default(scopes=scopes)
+                logger.info("✅ 成功使用 'Application Default Credentials' (Cloud Run 環境) 進行驗證。")
+            except DefaultCredentialsError:
+                logger.warning("⚠️ 未能自動獲取 GCP 憑證 (ADC)，將嘗試其他方法...")
+                creds = None  # 確保 creds 為 None，以便繼續
 
-            # 3. 檢查憑證是否成功載入
+            # --- 階段 2 & 3: 如果 ADC 失敗，則嘗試環境變數或本地檔案 ---
             if not creds:
-                # 理論上，如果 creds_json_str 和本地檔案都不存在，會在上面拋出錯誤
-                raise ValueError("無法獲取 Google 憑證 (環境變數和本地檔案均失敗)。")
+                # 2. 嘗試從環境變數讀取 (Zeabur / 生產環境)
+                creds_json_str = os.getenv('GOOGLE_CREDENTIALS_JSON')
 
-            # 4. 授權 gspread client (保持不變)
+                if creds_json_str:
+                    logger.info("偵測到 'GOOGLE_CREDENTIALS_JSON' 環境變數，將使用此憑證。")
+                    try:
+                        creds_dict = json.loads(creds_json_str)
+                        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+                    except json.JSONDecodeError:
+                        logger.error("無法解析 GOOGLE_CREDENTIALS_JSON，請檢查環境變數的 JSON 格式。")
+                        raise
+                    except Exception as e:
+                        logger.error(f"從環境變數載入憑證失敗: {e}")
+                        raise
+
+                else:
+                    # 3. 回退到本地檔案 (本地開發)
+                    logger.info("未偵測到 'GOOGLE_CREDENTIALS_JSON'，將回退使用本地憑證檔案 'gcp_credentials.json'。")
+
+                    creds_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'gcp_credentials.json')
+
+                    if not os.path.exists(creds_path):
+                        logger.error(f"本地憑證檔案 'gcp_credentials.json' 不存在於: {creds_path}")
+                        raise FileNotFoundError(f"本地憑證檔案不存在: {creds_path}")
+
+                    creds = Credentials.from_service_account_file(creds_path, scopes=scopes)
+
+            # 4. 檢查憑證是否成功載入
+            if not creds:
+                raise ValueError("無法獲取 Google 憑證 (Cloud Run、環境變數和本地檔案均失敗)。")
+
+            # 5. 授權 gspread client (保持不變)
             self.client = gspread.authorize(creds)
-            
-            # 5. 開啟試算表 (保持不變)
+
+            # 6. 開啟試算表 (保持不變)
             sheet_url = os.getenv("GOOGLE_SHEET_URL")
             if not sheet_url:
                 raise ValueError("GOOGLE_SHEET_URL 環境變數未設定")
-            
+
             self.spreadsheet = self.client.open_by_url(sheet_url)
             logger.info(f"📊 成功開啟試算表: {self.spreadsheet.title}")
-            
-            # 6. 初始化工作表 (保持不變)
+
+            # 7. 初始化工作表 (保持不變)
             self._initialize_worksheets()
-            
+ 
         except Exception as e:
             logger.error(f"Google Sheets 初始化失敗: {e}")
             raise  # 重新拋出錯誤，以便 tenacity 捕捉
     
-    # --- 以下所有方法保持不變 ---
-
+    
     def _initialize_worksheets(self) -> None:
         """初始化所需的工作表"""
         worksheet_names = self.sheets_config.get('worksheets', {})
