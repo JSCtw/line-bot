@@ -1,4 +1,4 @@
-# core/line_notifier.py (v3.32修正)
+# core/line_notifier.py (v3.33修正)
 # -*- coding: utf-8 -*-
 """
 LINE 通知器
@@ -12,6 +12,7 @@ import asyncio # 為了 __del__ 中的 fallback
 # --- 【導入結構】---
 # 1. 'linebot.v3.messaging' 負責 API 客戶端
 # 2. 'linebot.v3.messaging.models' 負責所有資料模型
+# 3. 'linebot.v3.flex_message' 導入所有 Flex 元件
 
 
 # 1. 從 'linebot.v3.messaging' 導入 API 客戶端和配置
@@ -24,24 +25,24 @@ from linebot.v3.messaging import (
 
     # 訊息物件 (Text, Flex) 從這裡導入
     TextMessage,
-    FlexMessage
-    
+    FlexMessage    
 )
 
 # 2. 從 'linebot.v3.messaging.models' 導入所有資料模型
 from linebot.v3.messaging.models import (
     # 請求模型
     PushMessageRequest,
-    ReplyMessageRequest,
-    
-    # [3.32修正] Flex Message 元件 (Carousel, Bubble, etc.) 改從這裡導入
+    ReplyMessageRequest
+)
+
+# 3. [3.33修正] 從 'linebot.v3.flex_message' 導入所有 Flex 元件
+from linebot.v3.flex_message import (
     BubbleContainer,
     BoxComponent,
     TextComponent,
     ButtonComponent,
     URIAction,
-    CarouselContainer
-    
+    CarouselContainer    
 )
 
 from utils.logger import get_logger
