@@ -1,4 +1,4 @@
-# core/line_notifier.py (v3.33修正)
+# core/line_notifier.py (v3.34修正)
 # -*- coding: utf-8 -*-
 """
 LINE 通知器
@@ -32,17 +32,15 @@ from linebot.v3.messaging import (
 from linebot.v3.messaging.models import (
     # 請求模型
     PushMessageRequest,
-    ReplyMessageRequest
-)
+    ReplyMessageRequest,
 
-# 3. [3.33修正] 從 'linebot.v3.flex_message' 導入所有 Flex 元件
-from linebot.v3.flex_message import (
-    BubbleContainer,
-    BoxComponent,
-    TextComponent,
-    ButtonComponent,
-    URIAction,
-    CarouselContainer    
+# [3.34修正] Flex Message 元件 (V3 Class Names)
+    Bubble,
+    Box,
+    Text,
+    Button,
+    URI,
+    Carousel
 )
 
 from utils.logger import get_logger
@@ -176,9 +174,9 @@ class LineNotifier:
         # 建立多個泡泡
         bubbles = [self._create_news_bubble(item) for item in news_items]
         
-        # 建立輪播容器
-        # LINE 限制輪播一次最多 12 則
-        carousel_container = CarouselContainer(contents=bubbles[:12])
+        # 建立輪播容器 (LINE 限制輪播一次最多 12 則)
+        # [v3.4修正] 必須使用 V3 的類別名稱 (Carousel)
+        carousel_container = Carousel(contents=bubbles[:12])
         
         await self.send_flex_message(
             target_id=target_id,
@@ -186,21 +184,4 @@ class LineNotifier:
             container=carousel_container
         )
 
-    def __del__(self):
-        """
-        (非同步) 關閉 AsyncApiClient
-        """
-        if hasattr(self, 'async_api_client'):
-            # 在非同步環境中，正確的關閉方式是 await
-            # 但在 __del__ 中，我們只能盡力而為
-            try:
-                # 嘗試建立一個事件迴圈來關閉
-                import asyncio
-                try:
-                    loop = asyncio.get_running_loop()
-                    loop.create_task(self.async_api_client.close())
-                except RuntimeError:
-                    # 沒有正在運行的迴圈，只好用新的
-                    asyncio.run(self.async_api_client.close())
-            except Exception:
-                pass # 忽略關閉時的錯誤
+    # [v3.4修正] 移除 def __del__ 方法，我們用main.py中的atexit hook來關閉 http_client
