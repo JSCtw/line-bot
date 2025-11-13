@@ -1,12 +1,13 @@
-# main.py (v3.6- FastAPI 版本)
+# main.py
 # -*- coding: utf-8 -*-
 """
-LINE Bot 新聞推播系統 - v3.6
+LINE Bot 新聞推播系統 - v3.6.1 (FastAPI + 日誌修復)
 """
 
+# 本地開發時載入 .env 檔案（Cloud Run 會直接注入環境變數）
 from dotenv import load_dotenv
 
-load_dotenv(verbose=True)  # 本地開發時自動載入 .env
+load_dotenv(verbose=True)
 
 import sys
 import os
@@ -19,14 +20,13 @@ import asyncio
 import traceback
 from typing import Dict, Optional
 import atexit
+import logging  # ❗️ [v3.6.1] 導入 logging
+
 import requests
 
-# [v3.6] 導入 FastAPI 相關模組
+# FastAPI 導入
 from fastapi import FastAPI, Request, HTTPException, Header
 from fastapi.responses import PlainTextResponse
-
-# [v3.6] 移除了 Flask 的導入
-# from flask import Flask, request, abort
 
 # LINE Bot SDK
 from linebot.v3.webhook import WebhookHandler
@@ -34,7 +34,7 @@ from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import ApiException
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
-# 核心組件 (保持不變)
+# 核心組件
 from utils.config_manager import ConfigManager
 from utils.http_client import AsyncHTTPClient
 from core import NewsFetcher, NewsClassifier, NewsProcessor, LineNotifier, SheetManager
@@ -44,25 +44,43 @@ from utils.logger import get_logger
 # 全域設定與初始化
 # ==============================================================================
 
-logger = get_logger(__name__)
 config = ConfigManager().load_config()
 
-# 定義觸發詞 (保持不變)
+# ❗️ [v3.6.1 修正] 手動設定日誌系統
+# FastAPI/Uvicorn 預設不會完整設定 root logger
+# 導致所有 logger.info/error 都被丟進虛無
+log_level_str = config.get("app", {}).get("log_level", "INFO")
+log_level = logging.getLevelName(log_level_str.upper())
+log_formatter = logging.Formatter(
+    "%(asctime)s | %(name)s | %(levelname)s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+)
+stream_handler = logging.StreamHandler(sys.stderr)
+stream_handler.setFormatter(log_formatter)
+
+root_logger = logging.getLogger()
+root_logger.setLevel(log_level)
+if not root_logger.hasHandlers():  # 避免重複添加
+    root_logger.addHandler(stream_handler)
+# --- [日誌修正完畢] ---
+
+logger = get_logger(__name__)
+
+# 定義觸發詞
 TRIGGER_WORDS = ["🆕", "news", "News", "NEWS"]
 
-# [v3.6] 建立 FastAPI app
+# 建立 FastAPI app
 app = FastAPI(
     title=config.get("app", {}).get("name", "LINE Bot"),
-    version=config.get("app", {}).get("version", "3.6.0"),
+    version=config.get("app", {}).get("version", "3.6.1"),
 )
 
 # ==============================================================================
-# 警報函式 (保持不變)
+# 警報函式
 # ==============================================================================
 
 
 def _build_alert_payload(message: str, error: Exception = None) -> Optional[Dict]:
-    """(內部) 建立警報的 payload"""
+    """建立警報的 payload"""
     webhook_url = os.getenv("DISCORD_WEBHOOK_URL")
     if not webhook_url:
         return None
@@ -86,28 +104,24 @@ def _build_alert_payload(message: str, error: Exception = None) -> Optional[Dict
 
 
 def _sync_send_discord_alert(message: str, error: Exception = None):
-    """(同步 - 阻塞) 僅用於 Gunicorn 啟動失敗時的警報"""
+    """同步警報（啟動時使用）"""
     alert_data = _build_alert_payload(message, error)
     if not alert_data:
-        logger.warning("DISCORD_WEBHOOK_URL (Sync): 未設定。跳過警報。")
+        logger.warning("DISCORD_WEBHOOK_URL: 未設定。跳過警報。")
         return
 
     try:
         requests.post(alert_data["webhook_url"], json=alert_data["payload"], timeout=5)
     except Exception as e:
-        logger.error(f"CRITICAL: 發送 SYNC Discord 警報失敗: {e}")
+        logger.error(f"發送 SYNC Discord 警報失敗: {e}")
 
 
 async def _async_send_discord_alert(
     http_client: AsyncHTTPClient, message: str, error: Exception = None
 ):
-    """(非同步 - 不阻塞) 用於所有 Webhook 執行期間的警報"""
+    """非同步警報（執行時使用）"""
     alert_data = _build_alert_payload(message, error)
-    if not http_client:
-        logger.error("Async Discord 警報失敗: HTTP client 為 None。")
-        return
-    if not alert_data:
-        logger.warning("DISCORD_WEBHOOK_URL (Async): 未設定。跳過警報。")
+    if not http_client or not alert_data:
         return
 
     try:
@@ -115,17 +129,18 @@ async def _async_send_discord_alert(
             alert_data["webhook_url"], json_payload=alert_data["payload"]
         )
     except Exception as e:
-        logger.error(f"CRITICAL: 發送 ASYNC Discord 警報失敗: {e}")
+        logger.error(f"發送 ASYNC Discord 警報失敗: {e}")
 
 
 # ==============================================================================
-# NewsBot 主類別 (保持不變)
+# NewsBot 主類別
 # ==============================================================================
+
+
 class NewsBot:
-    """新聞機器人主控制器 - 統籌所有組件"""
+    """新聞機器人主控制器"""
 
     def __init__(self, config: Dict):
-        """初始化 NewsBot 的所有組件。"""
         self.config = config
         self.http_client: Optional[AsyncHTTPClient] = None
         self.sheet_manager: Optional[SheetManager] = None
@@ -152,32 +167,29 @@ class NewsBot:
             raise
 
     async def run_pipeline(self, target_id: str) -> None:
-        """執行完整的新聞處理流水線 (邏輯保持不變)"""
+        """執行完整的新聞處理流水線"""
         logger.info("=" * 50)
         logger.info(f"🚀 啟動新聞處理流水線 (目標: {target_id})")
         logger.info("=" * 50)
 
         try:
-            # (步驟 1)
             logger.info("📊 初始化 Google Sheets 連線...")
             await self.sheet_manager.initialize()
+
             glossary = await self.sheet_manager.load_glossary()
             logger.info(f"📚 載入術語表: {len(glossary)} 條術語")
             sent_links = await self.sheet_manager.get_sent_links()
             logger.info(f"📝 載入已發送記錄: {len(sent_links)} 條")
 
-            # (步驟 2)
             logger.info("📰 開始抓取新聞來源...")
             all_news = await self.news_fetcher.fetch_all_news()
 
-            # (步驟 3)
             logger.info("🎯 開始新聞分類與過濾...")
             important_news = await self.news_classifier.classify_and_filter(
                 all_news, sent_links
             )
             logger.info(f"✨ 過濾出 {len(important_news)} 則重要新聞")
 
-            # (步驟 4)
             logger.info("📝 開始新聞處理與摘要生成...")
             processed_news = await self.news_processor.process_news(
                 important_news, glossary
@@ -191,11 +203,9 @@ class NewsBot:
                 )
                 return
 
-            # (步驟 5)
             logger.info("📱 開始發送 LINE 通知...")
             await self.line_notifier.send_news_batch(processed_news, target_id)
 
-            # (步驟 6)
             logger.info("💾 記錄發送結果到 Google Sheets...")
             await self.sheet_manager.log_sent_news(processed_news)
 
@@ -206,6 +216,7 @@ class NewsBot:
             await _async_send_discord_alert(
                 self.http_client, f"Pipeline 執行失敗 (Target: {target_id})", e
             )
+
             try:
                 error_message = f"抱歉，處理新聞時發生錯誤。\n錯誤: {str(e)[:50]}...\n我們已收到通知並將盡快修復。"
                 await self.line_notifier.send_push_message_text(
@@ -216,14 +227,14 @@ class NewsBot:
 
 
 # ==============================================================================
-# 全域實例與初始化 (保持不變)
+# 全域實例與初始化
 # ==============================================================================
 
 try:
     news_bot = NewsBot(config)
 except Exception as e:
-    logger.critical(f"NewsBot 實例化失敗，無法啟動服務: {e}", exc_info=True)
-    _sync_send_discord_alert("NewsBot 實例化失敗，服務無法啟動", e)
+    logger.critical(f"NewsBot 實例化失敗: {e}", exc_info=True)
+    _sync_send_discord_alert("NewsBot 實例化失敗", e)
     sys.exit(1)
 
 handler: Optional[WebhookHandler] = None
@@ -231,12 +242,12 @@ _bot_initialized = False
 
 
 def initialize_bot_globally():
-    """在 worker 啟動後初始化 (邏輯保持不變)"""
+    """在 worker 啟動後初始化"""
     global _bot_initialized, handler
     if _bot_initialized:
         return
 
-    logger.info("Gunicorn worker 啟動，正在初始化 NewsBot 組件...")
+    logger.info("正在初始化 NewsBot 組件...")
     try:
         channel_secret = os.getenv("LINE_CHANNEL_SECRET")
         if not channel_secret:
@@ -245,32 +256,34 @@ def initialize_bot_globally():
         handler = WebhookHandler(channel_secret)
         logger.info("Webhook Handler 初始化成功")
 
+        # 註冊事件處理器
         handler.add(MessageEvent, message=TextMessageContent)(handle_message)
         logger.info("Webhook 事件處理器註冊成功")
 
         news_bot._initialize_components()
         _bot_initialized = True
-        logger.info("NewsBot 組件初始化成功 (Worker)")
+        logger.info("NewsBot 組件初始化成功")
 
+        # 註冊關閉掛鉤
         def shutdown_client():
             if _bot_initialized and news_bot and news_bot.http_client:
-                logger.info("Gunicorn worker 正在關閉，開始關閉 HTTP client...")
+                logger.info("正在關閉 HTTP client...")
                 try:
                     asyncio.run(news_bot.http_client.close())
-                    logger.info("HTTP client 已成功關閉。")
+                    logger.info("HTTP client 已成功關閉")
                 except Exception as e:
                     logger.error(f"關閉 HTTP client 時發生錯誤: {e}")
 
         atexit.register(shutdown_client)
-        logger.info("已註冊 atexit shutdown hook 用於關閉 HTTP client。")
+        logger.info("已註冊 atexit shutdown hook")
 
     except Exception as e:
-        logger.critical(f"Gunicorn worker 初始化失敗: {e}", exc_info=True)
-        _sync_send_discord_alert("Gunicorn worker 初始化失敗，服務可能無法啟動", e)
+        logger.critical(f"初始化失敗: {e}", exc_info=True)
+        _sync_send_discord_alert("初始化失敗", e)
         raise
 
 
-# [v3.6] 使用 FastAPI 啟動事件
+# FastAPI 啟動事件
 @app.on_event("startup")
 async def startup_event():
     """FastAPI 啟動時初始化"""
@@ -278,51 +291,45 @@ async def startup_event():
 
 
 # ==============================================================================
-# API 端點 (FastAPI 版本)
+# API 端點
 # ==============================================================================
 
 
-# [v3.6] 入口 A: LINE 使用者觸發 (FastAPI 語法)
 @app.post("/callback")
 async def callback(
     request: Request, x_line_signature: str = Header(None, alias="X-Line-Signature")
 ):
-    """處理來自 LINE 的 Webhook 事件"""
-    # initialize_bot_globally() # 註：已改用 startup_event 觸發
+    """處理 LINE Webhook"""
+    initialize_bot_globally()
 
-    body_bytes = await request.body()
-    body = body_bytes.decode("utf-8")
+    body = await request.body()
+    body_str = body.decode("utf-8")
 
-    logger.info(f"收到來自 LINE 的 Webhook 請求 - Body: {body}")
+    logger.info(f"收到 LINE Webhook - Body: {body_str}")
 
-    if not body:
-        logger.info(
-            "收到了空的請求 body，可能是來自 LINE 後台的 Verify 請求，直接回傳 OK。"
-        )
+    if not body_str:
+        logger.info("收到空請求，可能是 Verify 請求")
         return PlainTextResponse("OK")
 
     try:
-        handler.handle(body, x_line_signature)
+        handler.handle(body_str, x_line_signature)
     except InvalidSignatureError:
-        logger.error("Webhook 簽名驗證失敗，請檢查您的 Channel Secret。")
+        logger.error("Webhook 簽名驗證失敗")
         raise HTTPException(status_code=400, detail="Invalid signature")
     except ApiException as e:
-        logger.error(f"處理 LINE Webhook 時發生 API 錯誤: {e.body}")
+        logger.error(f"LINE API 錯誤: {e.body}")
         raise HTTPException(status_code=500, detail="LINE API error")
     except Exception as e:
-        logger.error(f"處理 Webhook 時發生未知錯誤: {e}", exc_info=True)
-        await _async_send_discord_alert(
-            news_bot.http_client, "Webhook /callback 發生嚴重錯誤", e
-        )
+        logger.error(f"Webhook 處理錯誤: {e}", exc_info=True)
+        await _async_send_discord_alert(news_bot.http_client, "Webhook 錯誤", e)
         raise HTTPException(status_code=500, detail="Internal server error")
 
     return PlainTextResponse("OK")
 
 
-# (handle_message 保持不變，它不是 API 端點)
 async def handle_message(event):
-    """處理文字訊息事件"""
-    # initialize_bot_globally() # 註：已在啟動時完成
+    """處理文字訊息"""
+    initialize_bot_globally()
 
     text = event.message.text.strip()
 
@@ -337,38 +344,39 @@ async def handle_message(event):
 
         logger.info(f"收到觸發指令 '{text}'，來自 ID: {source_id}")
 
-        try:
-            await news_bot.line_notifier.send_reply_message_text(
+        # ❗️ [v3.6.1 修正] reply_token 會快速過期
+        # 必須立刻啟動回覆任務，不能等待它完成
+        # 將「回覆」和「管線」作為兩個獨立的背景任務
+
+        reply_task = asyncio.create_task(
+            news_bot.line_notifier.send_reply_message_text(
                 event.reply_token,
                 "✅ 收到指令！正在為您準備最新國際新聞，過程約需 40-60 秒，請稍候...",
             )
+        )
 
-            logger.info(f"正在為 {source_id} 啟動背景新聞處理任務...")
-            asyncio.create_task(news_bot.run_pipeline(target_id=source_id))
+        pipeline_task = asyncio.create_task(news_bot.run_pipeline(target_id=source_id))
 
+        # 監控回覆任務（但不阻塞）
+        try:
+            await reply_task
         except Exception as e:
-            logger.error(
-                f"handle_message 失敗 (Source: {source_id}): {e}", exc_info=True
-            )
+            logger.error(f"回覆任務失敗: {e}", exc_info=True)
             await _async_send_discord_alert(
-                news_bot.http_client, f"handle_message 失敗 (Source: {source_id})", e
+                news_bot.http_client, f"回覆任務失敗 (Source: {source_id})", e
             )
-            try:
-                await news_bot.line_notifier.send_push_message_text(
-                    source_id,
-                    f"抱歉，啟動新聞處理時發生錯誤。\n我們已收到通知並將盡快修復。",
-                )
-            except Exception as push_e:
-                logger.error(f"連錯誤通知都發不出去: {push_e}")
+
+        # 不 await pipeline_task，讓它在背景執行
+        # run_pipeline 內部有自己的錯誤處理
+
     else:
-        logger.info(f"忽略非觸發詞 '{text}'，來自 ID: {event.source.user_id}")
+        logger.info(f"忽略非觸發詞 '{text}'")
 
 
-# [v3.6] 入口 B: n8n 定時觸發 (FastAPI 語法)
 @app.post("/trigger-push")
-async def trigger_push(authorization: str = Header(None, alias="Authorization")):
-    """處理來自 n8n 的定時推播請求"""
-    # initialize_bot_globally() # 註：已在啟動時完成
+async def trigger_push(authorization: str = Header(None)):
+    """處理定時推播"""
+    initialize_bot_globally()
 
     secret_key = os.getenv("TRIGGER_SECRET_KEY")
     if not secret_key or authorization != f"Bearer {secret_key}":
@@ -377,30 +385,27 @@ async def trigger_push(authorization: str = Header(None, alias="Authorization"))
 
     default_target_id = os.getenv("USER_ID")
     if not default_target_id:
-        logger.error("環境變數 USER_ID 未設定，無法執行定時推播")
+        logger.error("USER_ID 未設定")
         await _async_send_discord_alert(
             news_bot.http_client, "trigger-push 失敗：USER_ID 未設定", None
         )
         raise HTTPException(status_code=500, detail="USER_ID not configured")
 
-    logger.info(f"收到 n8n 定時觸發指令，將推播至預設 ID: {default_target_id}")
+    logger.info(f"收到定時觸發，推播至: {default_target_id}")
 
     try:
         asyncio.create_task(news_bot.run_pipeline(target_id=default_target_id))
-        return PlainTextResponse("OK: News pipeline triggered for default user.")
+        return PlainTextResponse("OK: News pipeline triggered")
     except Exception as e:
-        logger.error(f"啟動 /trigger-push 任務失敗: {e}", exc_info=True)
-        await _async_send_discord_alert(
-            news_bot.http_client, "啟動 /trigger-push 任務失敗", e
-        )
-        raise HTTPException(status_code=500, detail="Failed to create background task")
+        logger.error(f"啟動 trigger-push 失敗: {e}", exc_info=True)
+        await _async_send_discord_alert(news_bot.http_client, "trigger-push 失敗", e)
+        raise HTTPException(status_code=500, detail="Failed to trigger pipeline")
 
 
-# [v3.6] 健康檢查端點 (FastAPI 語法)
 @app.get("/")
 async def health_check():
-    """健康檢查端點"""
-    # initialize_bot_globally() # 註：已在啟動時完成
+    """健康檢查"""
+    initialize_bot_globally()
     return PlainTextResponse(
         f"{config['app']['name']} v{config['app']['version']} is running. "
         f"Bot initialized: {_bot_initialized}"
@@ -408,20 +413,18 @@ async def health_check():
 
 
 # ==============================================================================
-# 本地開發伺服器啟動
+# 本地開發啟動
 # ==============================================================================
+
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8080))
     logger.info(f"啟動 Uvicorn 開發伺服器於 http://0.0.0.0:{port}")
 
-    # [v3.6]
-    # Uvicorn 啟動時會自動觸發 @app.on_event("startup")
-    # 我們不再需要手動呼叫 initialize_bot_globally()
-    # try:
-    #     initialize_bot_globally()
-    # except Exception as e:
-    #     logger.critical(f"本地啟動時初始化失敗: {e}", exc_info=True)
-    #     sys.exit(1)
+    try:
+        initialize_bot_globally()
+    except Exception as e:
+        logger.critical(f"本地啟動失敗: {e}", exc_info=True)
+        sys.exit(1)
 
     import uvicorn
 
