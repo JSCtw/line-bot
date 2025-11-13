@@ -16,9 +16,9 @@ from .sheet_manager import SheetManager
 
 # Define what gets imported when someone uses "from core import *"
 __all__ = [
-    'LineNotifier',
-    'NewsClassifier',
-    'NewsFetcher',
-    'NewsProcessor',
-    'SheetManager',
+    "LineNotifier",
+    "NewsClassifier",
+    "NewsFetcher",
+    "NewsProcessor",
+    "SheetManager",
 ]

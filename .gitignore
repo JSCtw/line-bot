@@ -10,11 +10,17 @@ venv/
 ENV/
 env/
 
-# Dotenv
+# 密鑰檔案
 .env
-
-#雲端金鑰
 gcp_credentials.json
+*.json
+
+# 作業系統檔案
+.DS_Store
+Thumbs.db
 
 # IDE/Editor files
 .vscode/
+
+# IDE 個人設定 (不是 .vscode/settings.json)
+.idea/

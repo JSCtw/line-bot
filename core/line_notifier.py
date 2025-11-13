@@ -1,4 +1,4 @@
-# core/line_notifier.py (v3.35 - from_json 版本)
+# core/line_notifier.py (v3.6 - from_json)
 # -*- coding: utf-8 -*-
 """
 LINE 通知器
@@ -17,13 +17,10 @@ from linebot.v3.messaging import (
     Configuration,
     TextMessage,
     FlexMessage,
-    FlexContainer  # 關鍵：用於 from_json
+    FlexContainer,  # 關鍵：用於 from_json
 )
 
-from linebot.v3.messaging.models import (
-    PushMessageRequest,
-    ReplyMessageRequest
-)
+from linebot.v3.messaging.models import PushMessageRequest, ReplyMessageRequest
 
 from utils.logger import get_logger
 
@@ -34,10 +31,10 @@ class LineNotifier:
     """LINE 通知器，負責發送 LINE 訊息"""
 
     def __init__(self, config: Dict[str, Any]):
-        self.config = config.get('line_bot', {})
-        
+        self.config = config.get("line_bot", {})
+
         # 從環境變數讀取 LINE Bot 憑證
-        access_token = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
+        access_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
         if not access_token:
             logger.error("環境變數 LINE_CHANNEL_ACCESS_TOKEN 未設定")
             raise ValueError("LINE_CHANNEL_ACCESS_TOKEN 未設定")
@@ -53,8 +50,7 @@ class LineNotifier:
         """
         try:
             reply_request = ReplyMessageRequest(
-                reply_token=reply_token,
-                messages=[TextMessage(text=text)]
+                reply_token=reply_token, messages=[TextMessage(text=text)]
             )
             await self.line_bot_api.reply_message(reply_request)
             logger.info(f"已回覆訊息至 token: {reply_token[:10]}...")
@@ -68,27 +64,22 @@ class LineNotifier:
         """
         try:
             push_request = PushMessageRequest(
-                to=target_id,
-                messages=[TextMessage(text=text)]
+                to=target_id, messages=[TextMessage(text=text)]
             )
             await self.line_bot_api.push_message(push_request)
             logger.info(f"已推播文字訊息至: {target_id}")
         except Exception as e:
             logger.error(f"推播文字訊息失敗: {e}")
 
-    async def send_flex_message(self, target_id: str, alt_text: str, container: FlexContainer) -> None:
+    async def send_flex_message(
+        self, target_id: str, alt_text: str, container: FlexContainer
+    ) -> None:
         """
         (付費) 主動推播 Flex Message
         """
         try:
-            message = FlexMessage(
-                alt_text=alt_text,
-                contents=container
-            )
-            push_request = PushMessageRequest(
-                to=target_id,
-                messages=[message]
-            )
+            message = FlexMessage(alt_text=alt_text, contents=container)
+            push_request = PushMessageRequest(to=target_id, messages=[message])
             await self.line_bot_api.push_message(push_request)
             logger.info(f"已推播 Flex Message 至: {target_id}")
         except Exception as e:
@@ -97,7 +88,7 @@ class LineNotifier:
     def _create_news_bubble_json(self, news_item: Dict[str, str]) -> Dict:
         """
         (內部) 建立單一新聞的 Flex Message Bubble JSON
-        
+
         這個 JSON 結構來自 LINE Flex Message Simulator
         你可以在這裡客製化樣式：https://developers.line.biz/flex-simulator/
         """
@@ -109,20 +100,20 @@ class LineNotifier:
                 "contents": [
                     {
                         "type": "text",
-                        "text": news_item.get('source', 'News'),
+                        "text": news_item.get("source", "News"),
                         "weight": "bold",
                         "color": "#AAAAAA",
-                        "size": "sm"
+                        "size": "sm",
                     },
                     {
                         "type": "text",
-                        "text": news_item.get('title', 'No Title'),
+                        "text": news_item.get("title", "No Title"),
                         "weight": "bold",
                         "size": "xl",
                         "margin": "md",
-                        "wrap": True
-                    }
-                ]
+                        "wrap": True,
+                    },
+                ],
             },
             "body": {
                 "type": "box",
@@ -130,12 +121,12 @@ class LineNotifier:
                 "contents": [
                     {
                         "type": "text",
-                        "text": news_item.get('summary', 'No summary available.'),
+                        "text": news_item.get("summary", "No summary available."),
                         "wrap": True,
                         "size": "sm",
-                        "margin": "md"
+                        "margin": "md",
                     }
-                ]
+                ],
             },
             "footer": {
                 "type": "box",
@@ -149,17 +140,19 @@ class LineNotifier:
                         "action": {
                             "type": "uri",
                             "label": "閱讀原文",
-                            "uri": news_item.get('link', 'https://example.com')
-                        }
+                            "uri": news_item.get("link", "https://example.com"),
+                        },
                     }
-                ]
-            }
+                ],
+            },
         }
 
-    async def send_news_batch(self, news_items: List[Dict[str, str]], target_id: str) -> None:
+    async def send_news_batch(
+        self, news_items: List[Dict[str, str]], target_id: str
+    ) -> None:
         """
         (核心) 建立並發送新聞輪播
-        
+
         使用 FlexContainer.from_json() 方法，100% 避免 Import 問題
         """
         if not news_items:
@@ -169,32 +162,29 @@ class LineNotifier:
         try:
             # 建立多個 Bubble JSON（最多 12 則）
             bubbles_json = [
-                self._create_news_bubble_json(item) 
-                for item in news_items[:12]
+                self._create_news_bubble_json(item) for item in news_items[:12]
             ]
-            
+
             # 建立 Carousel JSON
-            carousel_json = {
-                "type": "carousel",
-                "contents": bubbles_json
-            }
-            
+            carousel_json = {"type": "carousel", "contents": bubbles_json}
+
             # 使用 from_json 轉換為 FlexContainer
+            # 必須先 dumps(dict) 轉為 string, 再 from_json(string) 轉為 object
             carousel_container = FlexContainer.from_json(json.dumps(carousel_json))
-            
+
             # 發送
             await self.send_flex_message(
                 target_id=target_id,
                 alt_text=f"您有 {len(bubbles_json)} 則最新國際新聞",
-                container=carousel_container
+                container=carousel_container,
             )
-            
+
             logger.info(f"成功發送 {len(bubbles_json)} 則新聞至 {target_id}")
-            
+
         except Exception as e:
             logger.error(f"發送新聞批次失敗: {e}", exc_info=True)
             # 降級方案：發送純文字通知
             await self.send_push_message_text(
                 target_id=target_id,
-                text=f"❌ 新聞發送失敗\n\n共有 {len(news_items)} 則新聞，但傳送時發生錯誤。請稍後再試。"
+                text=f"❌ 新聞發送失敗\n\n共有 {len(news_items)} 則新聞，但傳送時發生錯誤。請稍後再試。",
             )
