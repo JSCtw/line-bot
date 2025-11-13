@@ -1,47 +1,47 @@
-#cloudbuild.yaml (v3.5)
+#cloudbuild.yaml (v3.6)
 steps:
-# 步驟 1: 強制無快取建置 - 這會 100% 重新執行 Dockerfile 中的每一個步驟，包含 pip install
-- name: 'gcr.io/cloud-builders/docker'
-  args:
-  - 'build'
-  - '--no-cache'
-  - '--pull'  # 強制拉取最新的 base image
-  - '-t'
-  - 'gcr.io/$PROJECT_ID/news-bot:${SHORT_SHA}'
-  - '.'
+  # 步驟 1: 強制無快取建置
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - "build"
+      - "--no-cache"
+      - "--pull"
+      - "-t"
+      # ❗️ [v3.6修正] 使用 $BUILD_ID 替代 ${SHORT_SHA}
+      - "gcr.io/news-bot-v2/news-bot:$BUILD_ID"
+      - "."
 
-# 步驟 2: 將建置好的新映像推送到 Artifact Registry (GCR)
-- name: 'gcr.io/cloud-builders/docker'
-  args:
-  - 'push'
-  - 'gcr.io/$PROJECT_ID/news-bot:${SHORT_SHA}'
+  # 步驟 2: 推送映像
+  - name: "gcr.io/cloud-builders/docker"
+    args: ["push", "gcr.io/news-bot-v2/news-bot:$BUILD_ID"]
 
-# 步驟 3: 部署映像到 Cloud Run
-- name: 'gcr.io/cloud-builders/gcloud'
-  args:
-  - 'run'
-  - 'deploy'
-  - 'news-bot-v2' # 服務名稱
-  - '--image=gcr.io/$PROJECT_ID/news-bot:${SHORT_SHA}' # 剛剛建置的映像
-  - '--region=asia-east1'
-  - '--platform=managed'
-  - '--allow-unauthenticated'
+  # 步驟 3: 部署映像到 Cloud Run
+  - name: "gcr.io/google-cloud-sdk/gcloud"
+    args:
+      - "run"
+      - "deploy"
+      - "news-bot-v2" # 服務名稱
+      # ❗️ [v3.5.1 修正] 部署 $BUILD_ID 標記的映像
+      - "--image=gcr.io/news-bot-v2/news-bot:$BUILD_ID"
+      - "--region=asia-east1"
+      - "--platform=managed"
+      - "--allow-unauthenticated"
 
-# 步驟 4: (可選) 清理舊的、未被標記的映像
-- name: 'gcr.io/google-cloud-sdk/gcloud'
-  args:
-  - 'artifacts'
-  - 'docker'
-  - 'images'
-  - 'delete'
-  - 'gcr.io/news-bot-v2/news-bot'
-  - '--delete-untagged'
-  - '--quiet'
+  # 步驟 4: (可選) 清理舊的、未被標記的映像
+  - name: "gcr.io/google-cloud-sdk/gcloud"
+    args:
+      - "artifacts"
+      - "docker"
+      - "images"
+      - "delete"
+      - "gcr.io/news-bot-v2/news-bot"
+      - "--delete-untagged"
+      - "--quiet"
 
-# 將映像 URL 寫入日誌，方便追蹤
+# 將映像 URL 寫入日誌
 images:
-- 'gcr.io/$PROJECT_ID/news-bot:${SHORT_SHA}'
+  - "gcr.io/news-bot-v2/news-bot:$BUILD_ID"
 
 options:
-  machineType: 'N1_HIGHCPU_8'  # 使用更強的機器加速建置
+  machineType: "N1_HIGHCPU_8"
   logging: CLOUD_LOGGING_ONLY
