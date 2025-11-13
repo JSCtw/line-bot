@@ -1,46 +1,24 @@
-#cloudbuild.yaml (v3.6)
 steps:
-  # 步驟 1: 強制無快取建置
+  # 步驟 1: 強制「無快取」建置
   - name: "gcr.io/cloud-builders/docker"
     args:
       - "build"
       - "--no-cache"
       - "--pull"
       - "-t"
-      # ❗️ [v3.6修正] 使用 $BUILD_ID 替代 ${SHORT_SHA}
-      - "gcr.io/news-bot-v2/news-bot:$BUILD_ID"
+      # ❗️ 標籤 1/3 (必須一致)
+      - "gcr.io/news-bot-v2/news-bot:v3-6-2"
       - "."
 
   # 步驟 2: 推送映像
   - name: "gcr.io/cloud-builders/docker"
-    args: ["push", "gcr.io/news-bot-v2/news-bot:$BUILD_ID"]
-
-  # 步驟 3: 部署映像到 Cloud Run
-  - name: "gcr.io/google-cloud-sdk/gcloud"
-    args:
-      - "run"
-      - "deploy"
-      - "news-bot-v2" # 服務名稱
-      # ❗️ [v3.5.1 修正] 部署 $BUILD_ID 標記的映像
-      - "--image=gcr.io/news-bot-v2/news-bot:$BUILD_ID"
-      - "--region=asia-east1"
-      - "--platform=managed"
-      - "--allow-unauthenticated"
-
-  # 步驟 4: (可選) 清理舊的、未被標記的映像
-  - name: "gcr.io/google-cloud-sdk/gcloud"
-    args:
-      - "artifacts"
-      - "docker"
-      - "images"
-      - "delete"
-      - "gcr.io/news-bot-v2/news-bot"
-      - "--delete-untagged"
-      - "--quiet"
+    # ❗️ 標籤 2/3 (必須一致)
+    args: ["push", "gcr.io/news-bot-v2/news-bot:v3-6-2"]
 
 # 將映像 URL 寫入日誌
 images:
-  - "gcr.io/news-bot-v2/news-bot:$BUILD_ID"
+  # ❗️ 標籤 3/3 (必須一致)
+  - "gcr.io/news-bot-v2/news-bot:v3-6-2"
 
 options:
   machineType: "E2_HIGHCPU_8"
