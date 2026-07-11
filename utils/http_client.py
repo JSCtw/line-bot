@@ -15,7 +15,7 @@ from typing import Dict, Any, Optional, Union
 import aiohttp
 from aiohttp.client_exceptions import ClientResponseError
 from requests.exceptions import RequestException
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, retry_if_exception
 
 # 修正：由於我們不再於此檔案中使用 log_async_execution_time，因此移除此導入
 # from utils.logger import log_async_execution_time
@@ -23,6 +23,13 @@ from utils.logger import get_logger
 
 # 改用 get_logger 來獲取 logger 實例
 logger = get_logger(__name__)
+
+
+# [v3.7.1] AI API 可重試錯誤判斷：429 (rate limit) 與 5xx 應重試，其餘 4xx (如 400 模型不存在) 不重試
+def _is_retryable_ai_error(e: BaseException) -> bool:
+    if isinstance(e, ClientResponseError):
+        return e.status == 429 or e.status >= 500
+    return isinstance(e, (aiohttp.ClientConnectionError, asyncio.TimeoutError))
 
 # ============================================================================
 # 同步 HTTP 客戶端 (這部分保持不變)
@@ -177,6 +184,15 @@ class AsyncHTTPClient:
             logger.warning(f"⚠️ Async POST JSON 失敗: {url} - {e}")
             raise
 
+    # [v3.7.1] 429/5xx 重試策略 (依 spec: min=5s, max=120s, 5 次)
+    # OpenRouter free 模型有 per-model RPM 限制 (如 llama-3.3-70b:free 為 8 req/min)，
+    # 429 必須以退避重試吸收，否則批次請求會瞬間全滅
+    @retry(
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=2, min=5, max=120),
+        retry=retry_if_exception(_is_retryable_ai_error),
+        reraise=True,
+    )
     async def call_ai_api(self, prompt: str, **kwargs) -> str:
         """異步呼叫 AI API，接受動態參數"""
         session = await self._get_session()

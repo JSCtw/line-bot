@@ -6,7 +6,7 @@
 env: "development"
 app:
   name: "LINE News Bot"
-  version: "3.7.0"
+  version: "3.7.1"
   timezone: "Asia/Taipei"
   log_level: "INFO"
 
@@ -50,8 +50,10 @@ ai_models:
     timeout: 90
 
 # 分類器設定
+# [v3.7.1] max_concurrent 5 → 2：llama-3.3-70b:free 上游限流 8 req/min，
+# 高並發會瞬間打爆限額；降低並發 + call_ai_api 的 429 退避重試配合使用
 classifier:
-  max_concurrent: 5
+  max_concurrent: 2
   batch_size: 8
   max_retries: 3
   retry_delay: 1.0

@@ -60,10 +60,20 @@ class OptimizedNewsClassifier:
             return []
         
         logger.info(f"🎯 開始分類 {len(unsent_news)} 則未發送新聞...")
-        
+
         # 執行批次分類
         classified_results = await self._classify_news_batch(unsent_news)
-        
+
+        # [v3.7.1] 全滅防護：若所有批次都分類失敗 (如模型下架、配額耗盡)，
+        # 應視為流水線錯誤並中止，而不是默默回傳 0 則讓用戶收到「沒有新聞」的誤導訊息
+        if classified_results and all(
+            r.get("scope_raw") == "分類失敗" for r in classified_results
+        ):
+            raise RuntimeError(
+                f"AI 分類全面失敗 ({len(classified_results)} 則全數失敗)，"
+                f"可能原因: 模型限流/下架或 API 配額耗盡，已中止流水線"
+            )
+
         # 過濾重要新聞
         important_news = self._filter_important_news(classified_results)
         
