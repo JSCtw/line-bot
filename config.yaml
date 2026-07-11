@@ -6,42 +6,45 @@
 env: "development"
 app:
   name: "LINE News Bot"
-  version: "3.3.0"
+  version: "3.7.0"
   timezone: "Asia/Taipei"
   log_level: "INFO"
 
 # 新聞來源設定
+# [v3.7.0] 移除 Reuters (域名已停止解析) 與 CNN (feed 凍結於 2023-04，是舊聞推播的元凶)
+# [v3.7.0] 新增 NYT 與 NBC News (官方 world feed)
 news_sources:
   rss_feeds:
     BBC: "https://feeds.bbci.co.uk/news/world/rss.xml"
-    CNN: "http://rss.cnn.com/rss/edition_world.rss"
     Fox_News: "https://moxie.foxnews.com/google-publisher/world.xml"
-    Reuters: "https://feeds.reuters.com/reuters/worldnews"
+    NYT: "https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml"
+    NBC_News: "https://feeds.nbcnews.com/nbcnews/public/world"
     Al_Jazeera: "https://www.aljazeera.com/xml/rss/all.xml"
-  
+
   html_sources:
   #將半島電視台暫時註解
-    #Al_Jazeera:
-    #  url: "https://www.aljazeera.com/news/"
-    #  # 使用逗號分隔，匹配多種可能的容器
-    #  selector: "article.gc, div.card-live"
-    #  # 匹配多種可能的標題結構
-    #  title_selector: 'h3.gc__title, [data-testid="card-title"]'
-    #  # 匹配多種可能的連結結構
-    #  link_selector: "a.u-clickable-card__link, a"
-    #  content_selector: "div.wysiwyg--all-content"
-    #  max_articles: 15
+  #Al_Jazeera:
+  #  url: "https://www.aljazeera.com/news/"
+  #  # 使用逗號分隔，匹配多種可能的容器
+  #  selector: "article.gc, div.card-live"
+  #  # 匹配多種可能的標題結構
+  #  title_selector: 'h3.gc__title, [data-testid="card-title"]'
+  #  # 匹配多種可能的連結結構
+  #  link_selector: "a.u-clickable-card__link, a"
+  #  content_selector: "div.wysiwyg--all-content"
+  #  max_articles: 15
 
 # AI 模型設定
+# [v3.7.0] 原模型已自 OpenRouter 下架 (mistral-7b-instruct 全下架、gemma-3-12b-it:free 停止免費供應)
 ai_models:
   classification:
-    model: "mistralai/mistral-7b-instruct"
+    model: "meta-llama/llama-3.3-70b-instruct:free"
     temperature: 0.1
     max_tokens_per_article: 30
     timeout: 60
-  
+
   summarization:
-    model: "google/gemma-3-12b-it:free"
+    model: "google/gemma-4-31b-it:free"
     temperature: 0.6
     max_tokens: 500
     timeout: 90
@@ -54,7 +57,18 @@ classifier:
   retry_delay: 1.0
   scope_keywords:
     global: ["global", "全球性", "國際性", "worldwide", "international"]
-    regional: ["regional", "區域性", "局部性", "國外", "地區", "區域", "european", "asian", "african"]
+    regional:
+      [
+        "regional",
+        "區域性",
+        "局部性",
+        "國外",
+        "地區",
+        "區域",
+        "european",
+        "asian",
+        "african",
+      ]
     domestic: ["domestic", "國內性", "local", "national"]
 
 # 新聞處理設定
@@ -66,6 +80,9 @@ news_processing:
   max_groups_to_process: 5
   max_news_per_source_in_final: 2
   max_final_news: 5
+  # [v3.7.0] 時效性過濾：超過此天數的新聞一律丟棄；無發布日期的條目也一律丟棄
+  max_news_age_days: 3
+  allow_no_publish_date: false
 
 # HTTP 請求設定
 http:
@@ -73,7 +90,7 @@ http:
   max_retries: 3
   retry_delay: 1.0
   user_agent: "Mozilla/5.0 (compatible; NewsBot/2.0)"
-  
+
 # Google Sheets 設定
 google_sheets:
   worksheets:
@@ -104,6 +121,6 @@ default_translations:
 
 # Cloud Run 最佳化設定
 cloud_run:
-  max_execution_time: 540  # 9分鐘 (Cloud Run 預設 15分鐘的緩衝)
+  max_execution_time: 540 # 9分鐘 (Cloud Run 預設 15分鐘的緩衝)
   memory_limit_mb: 512
   cpu_limit: 1.0

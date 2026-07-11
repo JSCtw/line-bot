@@ -1,0 +1,22 @@
+# [v3.7.0] 防止機密與雜物被 COPY . . 烤進映像檔
+# 機密（絕對不可進入映像）
+.env
+.env.*
+gcp_credentials.json
+*.json
+
+# Python 雜物
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# 版控與 IDE
+.git/
+.gitignore
+.vscode/
+.idea/
+
+# 文件（不需要進入執行環境）
+*.md

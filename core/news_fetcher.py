@@ -1,7 +1,9 @@
 # core/news_fetcher.py
 
 import asyncio
+import calendar
 import logging
+from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional
 from urllib.parse import urljoin
 # ❗️【步驟一】重新匯入 ThreadPoolExecutor
@@ -31,6 +33,10 @@ class NewsFetcher:
         self.max_news_per_source = self.processing_config.get('max_news_per_source', 20)
         self.min_content_length = self.processing_config.get('min_content_length', 50)
         self.max_content_preview = self.processing_config.get('max_content_preview', 2000)
+
+        # [v3.7.0] 時效性過濾設定
+        self.max_news_age_days = self.processing_config.get('max_news_age_days', 3)
+        self.allow_no_publish_date = self.processing_config.get('allow_no_publish_date', False)
 
         # ❗️【步驟二】重新建立線程池執行器
         self.executor = ThreadPoolExecutor(max_workers=5)
@@ -78,12 +84,27 @@ class NewsFetcher:
             
             # ... 後續的解析邏輯完全不變 ...
             news_items = []
+            skipped_old = 0
+            skipped_no_date = 0
             for entry in feed.entries[:self.max_news_per_source]:
                 title = getattr(entry, 'title', '').strip()
                 link = getattr(entry, 'link', '').strip()
                 if not title or not link:
                     logger.warning(f"⚠️ 發現一則無標題或無連結的 RSS 新聞，已跳過。來源: {source_name}")
                     continue
+
+                # [v3.7.0] 時效性過濾：無發布時間或超過 max_news_age_days 的新聞一律丟棄
+                published_at = self._parse_published_utc(entry)
+                if published_at is None:
+                    if not self.allow_no_publish_date:
+                        skipped_no_date += 1
+                        logger.debug(f"🗑️ 無發布時間，已丟棄: [{source_name}] {title}")
+                        continue
+                elif not self._is_news_recent(published_at):
+                    skipped_old += 1
+                    logger.debug(f"🗑️ 新聞過舊 ({published_at.isoformat()})，已丟棄: [{source_name}] {title}")
+                    continue
+
                 content_soup = BeautifulSoup(getattr(entry, 'summary', ''), "lxml")
                 content = content_soup.get_text(separator="\n", strip=True)
                 if len(content) < self.min_content_length:
@@ -91,14 +112,38 @@ class NewsFetcher:
                 news_items.append({
                     "source": source_name, "title": title, "link": link,
                     "content": content[:self.max_content_preview],
-                    "published": getattr(entry, 'published', ''), "type": "rss"
+                    "published": getattr(entry, 'published', ''),
+                    "published_at": published_at.isoformat() if published_at else "",
+                    "type": "rss"
                 })
-            
+
+            if skipped_old or skipped_no_date:
+                logger.info(f"🗑️ RSS {source_name}: 時效過濾丟棄 {skipped_old} 則過舊、{skipped_no_date} 則無日期")
             logger.info(f"✅ RSS {source_name}: 抓取到 {len(news_items)} 則有效新聞")
             return news_items
         except Exception as e:
             logger.error(f"❌ RSS {source_name} 抓取失敗: {e}")
             raise
+
+    # [v3.7.0] 時效性過濾輔助方法
+    def _parse_published_utc(self, entry) -> Optional[datetime]:
+        """
+        將 feedparser 解析出的 published_parsed (struct_time, 已是 UTC)
+        轉為 timezone-aware 的 UTC datetime。
+        優先使用 published_parsed，缺少時退回 updated_parsed；兩者皆無則回傳 None。
+        """
+        parsed = getattr(entry, 'published_parsed', None) or getattr(entry, 'updated_parsed', None)
+        if not parsed:
+            return None
+        try:
+            return datetime.fromtimestamp(calendar.timegm(parsed), tz=timezone.utc)
+        except (ValueError, OverflowError, TypeError, OSError):
+            return None
+
+    def _is_news_recent(self, published_at: datetime) -> bool:
+        """檢查新聞是否在 max_news_age_days 天內 (以當前 UTC 時間比較)"""
+        age = datetime.now(timezone.utc) - published_at
+        return age <= timedelta(days=self.max_news_age_days)
 
     # ... (所有 _fetch_html_news 相關的方法都保持不變) ...
     @retry( stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=2, max=8), retry=retry_if_exception_type(Exception) )
