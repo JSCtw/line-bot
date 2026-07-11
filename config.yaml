@@ -6,7 +6,7 @@
 env: "development"
 app:
   name: "LINE News Bot"
-  version: "3.7.1"
+  version: "3.7.2"
   timezone: "Asia/Taipei"
   log_level: "INFO"
 
@@ -35,25 +35,26 @@ news_sources:
   #  max_articles: 15
 
 # AI 模型設定
-# [v3.7.0] 原模型已自 OpenRouter 下架 (mistral-7b-instruct 全下架、gemma-3-12b-it:free 停止免費供應)
+# [v3.7.2] 改用低價付費模型：free 模型受全球性限流 (8 req/min) 與每日 50 次配額限制，
+# 實測無法支撐每輪 10+ 個請求。摘要沿用本專案原本的 gemma-3-12b-it (付費版)。
+# 需要 OpenRouter 帳戶有儲值 (https://openrouter.ai/settings/credits)
 ai_models:
   classification:
-    model: "meta-llama/llama-3.3-70b-instruct:free"
+    model: "google/gemini-2.5-flash-lite"
     temperature: 0.1
     max_tokens_per_article: 30
     timeout: 60
 
   summarization:
-    model: "google/gemma-4-31b-it:free"
+    model: "google/gemma-3-12b-it"
     temperature: 0.6
     max_tokens: 500
     timeout: 90
 
 # 分類器設定
-# [v3.7.1] max_concurrent 5 → 2：llama-3.3-70b:free 上游限流 8 req/min，
-# 高並發會瞬間打爆限額；降低並發 + call_ai_api 的 429 退避重試配合使用
+# [v3.7.2] 付費模型限流寬鬆，並發回調至 3 (429 退避重試保留作為安全網)
 classifier:
-  max_concurrent: 2
+  max_concurrent: 3
   batch_size: 8
   max_retries: 3
   retry_delay: 1.0
